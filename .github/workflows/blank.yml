@@ -1,0 +1,119 @@
+name: Build llama.cpp for Android arm64
+
+on:
+  schedule:
+    # 每 12 小时运行一次（UTC 时间）
+    - cron: '0 */12 * * *'
+  workflow_dispatch:       # 允许手动触发
+
+env:
+  LLAMA_REPO: ggerganov/llama.cpp
+  NDK_VERSION: r26d        # 可根据需要调整 NDK 版本
+  ANDROID_ABI: arm64-v8a
+  ANDROID_PLATFORM: 23     # 最低 API 级别，可改为更高如 24
+  BUILD_TYPE: Release
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 允许创建 release 和上传资产
+    outputs:
+      skip_build: ${{ steps.check-release.outputs.skip_build }}
+      latest_tag: ${{ steps.get-latest-tag.outputs.latest_tag }}
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest release tag from llama.cpp
+        id: get-latest-tag
+        run: |
+          LATEST_TAG=$(curl -s "https://api.github.com/repos/${{ env.LLAMA_REPO }}/releases/latest" | jq -r .tag_name)
+          echo "Latest tag: $LATEST_TAG"
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists in this repository
+        id: check-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="android-${{ steps.get-latest-tag.outputs.latest_tag }}"
+          if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "Release $TAG already exists. Skipping build."
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "No existing release found for $TAG. Proceeding with build."
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-and-build
+    if: needs.check-and-build.outputs.skip_build == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repository (for later release step)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false    # 我们不直接添加到 PATH，后面使用完整路径
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Checkout llama.cpp source at tag
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LLAMA_REPO }}
+          ref: ${{ needs.check-and-build.outputs.latest_tag }}
+          path: llama.cpp
+          fetch-depth: 1
+
+      - name: Configure CMake for Android
+        working-directory: llama.cpp
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ env.ANDROID_ABI }} \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_PLATFORM }} \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_MAKE_PROGRAM=ninja \
+            -GNinja
+
+      - name: Build
+        working-directory: llama.cpp
+        run: |
+          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel $(nproc)
+
+      - name: Package binaries
+        run: |
+          cd llama.cpp/build/bin
+          # 根据实际生成的文件调整，通常有 main 和 server 等
+          tar -czf ../../../llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz *
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64
+          path: llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz
+
+      - name: Create GitHub Release and upload asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="android-${{ needs.check-and-build.outputs.latest_tag }}"
+          # 如果标签已存在但 release 不存在（极少情况），gh release create 会失败，使用 --discard-history 可覆盖，但这里我们只创建新的
+          gh release create "$TAG" \
+            --title "Android arm64 build for llama.cpp ${{ needs.check-and-build.outputs.latest_tag }}" \
+            --notes "Automated build of llama.cpp ${{ needs.check-and-build.outputs.latest_tag }} for Android arm64-v8a." \
+            llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz
