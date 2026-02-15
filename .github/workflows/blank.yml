@@ -15,7 +15,7 @@ jobs:
 
       - name: Set up GitHub API access
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> $GITHUB_ENV
 
@@ -23,7 +23,7 @@ jobs:
         id: check-release
         run: |
           attempt=0
-          max_attempts=3
+          max_attempts=5
           while [ $attempt -lt $max_attempts ]; do
             response=$(curl -s -H "Accept: application/vnd.github.v3+json" -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest)
             LATEST_RELEASE=$(echo "$response" | jq -r '.tag_name // "null"' 2>/dev/null)
@@ -34,7 +34,7 @@ jobs:
               echo "Rate limit hit. Retrying after 60 seconds."
               sleep 60
             else
-              sleep 5
+              sleep 10
             fi
             attempt=$((attempt + 1))
           done
@@ -186,7 +186,7 @@ jobs:
         id: create-release
         uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           tag_name: ${{ steps.check-release.outputs.release_tag }}-android
           release_name: llama.cpp Android ${{ steps.check-release.outputs.release_tag }}
@@ -200,7 +200,7 @@ jobs:
         if: steps.check-release.outputs.new_release == 'true'
         uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create-release.outputs.upload_url }}
           asset_path: llama.cpp/llama-android-arm64
@@ -211,7 +211,7 @@ jobs:
         if: steps.check-release.outputs.new_release == 'true'
         uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create-release.outputs.upload_url }}
           asset_path: llama-android-module.zip
