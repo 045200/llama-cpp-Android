@@ -1,9 +1,12 @@
-name: Build llama-server Magisk Module (NDK r27, API 31)
+name: Build llama-server (Android) and Upload to Release
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write  # 允许创建/更新 release
 
 jobs:
   build:
@@ -45,97 +48,43 @@ jobs:
         run: |
           cmake --build build --target llama-server --config Release -j $(nproc)
 
-      - name: Prepare Magisk module structure
+      # 从 NDK 复制 libomp.so 以解决运行时依赖
+      - name: Copy libomp.so from NDK
         run: |
-          # 创建模块根目录
-          MODULE_ROOT="llama-module"
-          mkdir -p "$MODULE_ROOT/META-INF/com/google/android"
-          mkdir -p "$MODULE_ROOT/bin"
-
-          # 复制编译产物 (llama-server 和所有 .so)
-          cp build/bin/llama-server "$MODULE_ROOT/bin/"
-          if [ -d build/bin ]; then
-            cp build/bin/*.so "$MODULE_ROOT/bin/" 2>/dev/null || true
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          # 查找 clang 版本目录（例如 17）
+          CLANG_VERSION_DIR=$(ls "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/" | head -n1)
+          LIBOMP_SRC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/$CLANG_VERSION_DIR/lib/linux/aarch64/libomp.so"
+          if [ -f "$LIBOMP_SRC" ]; then
+            cp "$LIBOMP_SRC" build/bin/
+            echo "Copied libomp.so to build/bin/"
+          else
+            echo "::error::libomp.so not found in NDK path: $LIBOMP_SRC"
+            exit 1
           fi
-          chmod -R 755 "$MODULE_ROOT/bin"
 
-      - name: Create META-INF files
+      # 打包编译产物（llama-server 和所有 .so）
+      - name: Package artifacts
         run: |
-          MODULE_ROOT="llama-module"
-          # 下载 Magisk 官方模块安装器作为 update-binary
-          curl -L -o "$MODULE_ROOT/META-INF/com/google/android/update-binary" \
-            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
-          chmod 755 "$MODULE_ROOT/META-INF/com/google/android/update-binary"
-          # 创建 updater-script（仅需一个注释）
-          echo "#MAGISK" > "$MODULE_ROOT/META-INF/com/google/android/updater-script"
+          cd build/bin
+          zip ../../llama-server-android.zip llama-server *.so
+          cd ../..
+          echo "PACKAGE_PATH=$(realpath llama-server-android.zip)" >> $GITHUB_ENV
 
-      - name: Create module.prop
-        run: |
-          MODULE_ROOT="llama-module"
-          cat > "$MODULE_ROOT/module.prop" <<EOF
-          id=llama_server
-          name=llama.cpp Server for Redmi Note 12 Turbo
-          version=v1.0
-          versionCode=1
-          author=GitHub Actions
-          description=llama-server with shared libraries installed to /data/llama
-          EOF
-
-      - name: Create customize.sh (installation script)
-        run: |
-          MODULE_ROOT="llama-module"
-          cat > "$MODULE_ROOT/customize.sh" <<'EOF'
-          #!/system/bin/sh
-          # This script runs during module installation
-          # It copies binaries and libraries to /data/llama
-
-          TARGET_DIR="/data/llama"
-          ui_print "- Creating $TARGET_DIR"
-          mkdir -p "$TARGET_DIR"
-
-          ui_print "- Copying files to $TARGET_DIR"
-          cp -rf "$MODPATH/bin/." "$TARGET_DIR/"
-
-          ui_print "- Setting permissions"
-          chmod 755 "$TARGET_DIR/llama-server"
-          chmod 644 "$TARGET_DIR/"*.so 2>/dev/null
-
-          ui_print "- Done! Binaries installed to $TARGET_DIR"
-          ui_print "- You can start the server manually: $TARGET_DIR/llama-server"
-          EOF
-          chmod 755 "$MODULE_ROOT/customize.sh"
-
-      - name: Create service.sh (optional auto-start)
-        run: |
-          MODULE_ROOT="llama-module"
-          cat > "$MODULE_ROOT/service.sh" <<'EOF'
-          #!/system/bin/sh
-          # Auto-start script for llama-server (disabled by default)
-          # To enable, uncomment the following lines and adjust the model path.
-
-          MODEL_FILE="/sdcard/Download/model.gguf"
-          LOG_FILE="/data/local/tmp/llama_server.log"
-
-          # Wait for system to settle (optional)
-          # sleep 30
-
-          # Start llama-server in background (uncomment to enable)
-          # nohup /data/llama/llama-server \
-          #   -m "$MODEL_FILE" \
-          #   --host 0.0.0.0 --port 8080 \
-          #   -c 2048 \
-          #   > "$LOG_FILE" 2>&1 &
-          EOF
-          chmod 755 "$MODULE_ROOT/service.sh"
-
-      - name: Create ZIP archive
-        run: |
-          cd llama-module
-          zip -r ../llama-server-magisk.zip .
-          cd ..
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # 上传到 GitHub Release（固定 tag 为 llama-server-android，覆盖旧资产）
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: llama-server-magisk-module
-          path: llama-server-magisk.zip
+          tag_name: llama-server-android       # 固定 tag，每次都会覆盖该 release
+          name: llama-server Android Build     # release 显示名称
+          body: |
+            ###### 自动构建的 llama-server Android 版本
+            - 构建时间：${{ github.event.repository.updated_at }}
+            - 提交哈希：${{ github.sha }}
+            - ABI：arm64-v8a（支持 Android API 31+）
+            - 包含库：libggml.so, libggml-base.so, libggml-cpu.so, libllama.so, libmtmd.so, libomp.so
+          files: ${{ env.PACKAGE_PATH }}
+          fail_on_unmatched_files: true
+          overwrite: true                      # 覆盖同名 release 中的旧资产
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
