@@ -54,8 +54,8 @@ jobs:
 
           # 复制编译产物 (llama-server 和所有 .so)
           cp build/bin/llama-server "$MODULE_ROOT/bin/"
-          if [ -d build/lib ]; then
-            cp build/lib/*.so "$MODULE_ROOT/bin/" 2>/dev/null || true
+          if [ -d build/bin ]; then
+            cp build/bin/*.so "$MODULE_ROOT/bin/" 2>/dev/null || true
           fi
           chmod -R 755 "$MODULE_ROOT/bin"
 
