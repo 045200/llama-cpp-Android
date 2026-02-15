@@ -74,8 +74,8 @@ jobs:
           ndk-version: r27
           add-to-path: true
 
-      # 编译 llama-cli 和 llama-server 为 Android arm64 静态链接二进制（API 31 = Android 12）
-      - name: Build llama.cpp for Android arm64 (static)
+      # 编译 llama-cli 和 llama-server 为 Android arm64 静态二进制（API 31 = Android 12）
+      - name: Build llama.cpp for Android arm64 (fully static)
         if: steps.check.outputs.new_release == 'true'
         working-directory: llama.cpp
         run: |
@@ -88,10 +88,13 @@ jobs:
             -DCMAKE_C_FLAGS="-O3 -DNDEBUG" \
             -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
             -DLLAMA_STATIC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_BUILD_SERVER=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
-          make -j$(nproc) llama-server
-          mv bin/llama-server ../llama-server
+          make -j$(nproc) llama-cli llama-server
+          # 重命名并移动到上层目录
+          mv bin/llama-cli ../llama-android-arm64-cli
+          mv bin/llama-server ../llama-android-arm64-server
 
       # 制作 Magisk/KernelSU 模块（包含两个二进制）
       - name: Prepare Magisk/KernelSU module
@@ -100,7 +103,8 @@ jobs:
           MODULE_DIR="module"
           BIN_DIR="$MODULE_DIR/bin"
           mkdir -p "$BIN_DIR"
-          cp llama.cpp/llama-server "$BIN_DIR/llama-server"
+          cp llama.cpp/llama-android-arm64-cli "$BIN_DIR/llama"
+          cp llama.cpp/llama-android-arm64-server "$BIN_DIR/llama-server"
 
           # 创建 module.prop
           cat > "$MODULE_DIR/module.prop" <<EOF
@@ -109,7 +113,7 @@ jobs:
           version=${{ steps.check.outputs.release_tag }}
           versionCode=1
           author=GitHub Actions
-          description=llama.cpp 预编译二进制（静态链接），适用于 Android arm64 (API 31+)
+          description=llama.cpp 预编译二进制（完全静态链接），适用于 Android arm64 (API 31+)
           EOF
 
           # 创建 customize.sh（安装时运行，提供模型下载指引）
@@ -167,7 +171,7 @@ jobs:
           zip -r ../llama-android-module.zip ./*
           cd ..
 
-      # 上传构建产物（两个二进制和模块）
+      # 上传构建产物（两个二进制和模块）作为 Actions Artifact
       - name: Upload artifacts
         if: steps.check.outputs.new_release == 'true'
         uses: actions/upload-artifact@v4
@@ -178,64 +182,40 @@ jobs:
             llama.cpp/llama-android-arm64-server
             llama-android-module.zip
 
-      # 创建 GitHub Release
-      - name: Create GitHub Release
+      # 使用 GitHub CLI 创建或更新 Release
+      - name: Create or Update Release
         if: steps.check.outputs.new_release == 'true'
-        id: create-release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          tag_name: ${{ steps.check.outputs.release_tag }}-android
-          release_name: llama.cpp Android ${{ steps.check.outputs.release_tag }}
-          body: |
-            编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**静态链接**（无外部 .so 依赖）
-            包含文件：
-            - `llama-android-arm64-cli`：命令行交互工具
-            - `llama-android-arm64-server`：HTTP 服务器（兼容 OpenAI API）
-            - `llama-android-module-${{ steps.check.outputs.release_tag }}.zip`：Magisk/KernelSU 模块，安装后二进制位于 `/system/bin/llama` 和 `/system/bin/llama-server`，并提供模型下载脚本。
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.check.outputs.release_tag }}-android"
+          TITLE="llama.cpp Android ${{ steps.check.outputs.release_tag }}"
+          NOTES="编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**完全静态链接**（无外部 .so 依赖）\n包含文件：\n- \`llama-android-arm64-cli\`：命令行交互工具\n- \`llama-android-arm64-server\`：HTTP 服务器（兼容 OpenAI API）\n- \`llama-android-module-${{ steps.check.outputs.release_tag }}.zip\`：Magisk/KernelSU 模块，安装后二进制位于 \`/system/bin/llama\` 和 \`/system/bin/llama-server\`，并提供模型下载脚本。"
 
-      # 上传 CLI 二进制到 Release
-      - name: Upload CLI binary to release
-        if: steps.check.outputs.new_release == 'true'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: llama.cpp/llama-android-arm64-cli
-          asset_name: llama-android-arm64-cli
-          asset_content_type: application/octet-stream
+          # 检查 Release 是否已存在
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release tag $TAG 已存在，更新现有 Release"
+            # 更新 Release 描述（可选）
+            gh release edit "$TAG" --notes "$NOTES" --title "$TITLE"
+            # 上传 / 覆盖资产
+            gh release upload "$TAG" \
+              llama.cpp/llama-android-arm64-cli \
+              llama.cpp/llama-android-arm64-server \
+              llama-android-module.zip \
+              --clobber
+          else
+            echo "创建新的 Release: $TAG"
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              llama.cpp/llama-android-arm64-cli \
+              llama.cpp/llama-android-arm64-server \
+              llama-android-module.zip
+          fi
 
-      # 上传 Server 二进制到 Release
-      - name: Upload Server binary to release
-        if: steps.check.outputs.new_release == 'true'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: llama.cpp/llama-android-arm64-server
-          asset_name: llama-android-arm64-server
-          asset_content_type: application/octet-stream
-
-      # 上传模块到 Release
-      - name: Upload module to release
-        if: steps.check.outputs.new_release == 'true'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: llama-android-module.zip
-          asset_name: llama-android-module-${{ steps.check.outputs.release_tag }}.zip
-          asset_content_type: application/zip
-
-      # 更新本地版本记录文件并推送回仓库
+      # 更新本地版本记录文件并推送回仓库（仅当有新版本时）
       - name: Update current version file
-        if: steps.check.outputs.new_release == 'true'
+        if: steps.check.outputs.new_release == 'true' && github.event_name != 'workflow_dispatch'
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
