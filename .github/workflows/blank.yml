@@ -74,8 +74,8 @@ jobs:
           ndk-version: r27
           add-to-path: true
 
-      # 编译 llama-cli 和 llama-server 为 Android arm64 静态二进制（API 31 = Android 12）
-      - name: Build llama.cpp for Android arm64 (fully static)
+      # 编译 llama-cli 和 llama-server 为 Android arm64 完全静态二进制（API 31 = Android 12）
+      - name: Build llama.cpp for Android arm64 (fully static, no OpenMP)
         if: steps.check.outputs.new_release == 'true'
         working-directory: llama.cpp
         run: |
@@ -89,6 +89,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
             -DLLAMA_STATIC=ON \
             -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENMP=OFF \                     # 关键：禁用 OpenMP，避免 libomp.so 依赖
             -DLLAMA_BUILD_SERVER=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
           make -j$(nproc) llama-cli llama-server
@@ -113,7 +114,7 @@ jobs:
           version=${{ steps.check.outputs.release_tag }}
           versionCode=1
           author=GitHub Actions
-          description=llama.cpp 预编译二进制（完全静态链接），适用于 Android arm64 (API 31+)
+          description=llama.cpp 预编译二进制（完全静态链接，无 OpenMP），适用于 Android arm64 (API 31+)
           EOF
 
           # 创建 customize.sh（安装时运行，提供模型下载指引）
@@ -190,12 +191,12 @@ jobs:
         run: |
           TAG="${{ steps.check.outputs.release_tag }}-android"
           TITLE="llama.cpp Android ${{ steps.check.outputs.release_tag }}"
-          NOTES="编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**完全静态链接**（无外部 .so 依赖）\n包含文件：\n- \`llama-android-arm64-cli\`：命令行交互工具\n- \`llama-android-arm64-server\`：HTTP 服务器（兼容 OpenAI API）\n- \`llama-android-module-${{ steps.check.outputs.release_tag }}.zip\`：Magisk/KernelSU 模块，安装后二进制位于 \`/system/bin/llama\` 和 \`/system/bin/llama-server\`，并提供模型下载脚本。"
+          NOTES="编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**完全静态链接，无 OpenMP**（无外部 .so 依赖）\n包含文件：\n- \`llama-android-arm64-cli\`：命令行交互工具\n- \`llama-android-arm64-server\`：HTTP 服务器（兼容 OpenAI API）\n- \`llama-android-module-${{ steps.check.outputs.release_tag }}.zip\`：Magisk/KernelSU 模块，安装后二进制位于 \`/system/bin/llama\` 和 \`/system/bin/llama-server\`，并提供模型下载脚本。"
 
           # 检查 Release 是否已存在
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release tag $TAG 已存在，更新现有 Release"
-            # 更新 Release 描述（可选）
+            # 更新 Release 描述
             gh release edit "$TAG" --notes "$NOTES" --title "$TITLE"
             # 上传 / 覆盖资产
             gh release upload "$TAG" \
@@ -213,7 +214,7 @@ jobs:
               llama-android-module.zip
           fi
 
-      # 更新本地版本记录文件并推送回仓库（仅当有新版本时）
+      # 更新本地版本记录文件并推送回仓库（仅当有新版本且非手动触发时）
       - name: Update current version file
         if: steps.check.outputs.new_release == 'true' && github.event_name != 'workflow_dispatch'
         run: |
