@@ -26,16 +26,44 @@ jobs:
 
       - name: Get latest release tag from llama.cpp
         id: get-latest-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          RESPONSE=$(curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ env.LLAMA_REPO }}/releases/latest")
-          LATEST_TAG=$(echo "$RESPONSE" | jq -r .tag_name)
-          if [ "$LATEST_TAG" = "null" ] || [ -z "$LATEST_TAG" ]; then
-            echo "Failed to fetch latest tag or no releases found."
-            echo "latest_tag=" >> $GITHUB_OUTPUT
-          else
-            echo "Latest tag: $LATEST_TAG"
+          set -e
+          LATEST_TAG=""
+          
+          # 方法1: 通过 GitHub CLI 获取最新的正式 release
+          echo "Attempt 1: Fetch latest release via gh CLI..."
+          LATEST_TAG=$(gh release view --repo ${{ env.LLAMA_REPO }} --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+            echo "Found latest release tag: $LATEST_TAG"
             echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          
+          # 方法2: 使用 API 获取最新 release（作为备选）
+          echo "Attempt 2: Fetch latest release via API..."
+          LATEST_TAG=$(curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ env.LLAMA_REPO }}/releases/latest" | jq -r .tag_name)
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+            echo "Found latest release tag via API: $LATEST_TAG"
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # 方法3: 从 Git 标签获取最新版本（按版本排序）
+          echo "Attempt 3: Fetch tags via git ls-remote..."
+          # 获取所有标签，去除 '^{}' 的重复条目，按版本排序，取最后一个
+          TAGS=$(git ls-remote --tags https://github.com/${{ env.LLAMA_REPO }}.git | awk '{print $2}' | sed 's|refs/tags/||' | sed 's/\^{}//' | sort -u -V)
+          if [ -n "$TAGS" ]; then
+            LATEST_TAG=$(echo "$TAGS" | tail -n1)
+            echo "Found latest tag via git: $LATEST_TAG"
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # 所有方法均失败
+          echo "Failed to fetch latest tag using all methods."
+          echo "latest_tag=" >> $GITHUB_OUTPUT
 
       - name: Check if release already exists or tag missing
         id: check-release
