@@ -1,76 +1,149 @@
-name: Build llama-server Android arm64 Static (Pure Static - Fixed)
+name: Build llama-server Magisk Module
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout llama.cpp (最新主线)
+      - name: Checkout llama.cpp
         uses: actions/checkout@v4
         with:
-          repository: 'ggml-org/llama.cpp'
-          path: 'llama.cpp'
-          fetch-depth: 1
+          repository: ggerganov/llama.cpp
+          ref: master  # 可以改为特定 tag 或分支
 
-      - name: 安装 Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-
-      - name: Setup Android NDK r27c（完美支持 Android 15）
-        uses: nttld/setup-ndk@v1
+      - name: Set up NDK
         id: setup-ndk
+        uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: r26d
+          add-to-path: false
 
-      - name: CMake 配置 + 编译（纯静态 + 避坑优化）
-        working-directory: ./llama.cpp
+      - name: Install dependencies
         run: |
-          mkdir -p build && cd build
-          
-          cmake .. \
-            -G Ninja \
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Configure CMake for Android (arm64-v8a, shared libs)
+        run: |
+          mkdir -p build
+          cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-35 \
-            -DANDROID_STL=c++_static \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_OPENMP=OFF \
-            -DOpenMP_C_FLAGS="" \
-            -DOpenMP_CXX_FLAGS="" \
-            -DOpenMP_C_LIB_NAMES="" \
-            -DLLAMA_BUILD_EXAMPLES=ON \
-            -DLLAMA_BUILD_SERVER=ON \
+            -DANDROID_PLATFORM=android-24 \
+            -DGGML_SHARED=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
-            -DGGML_NATIVE=OFF \
-            -DGGML_LLAMAFILE=OFF
+            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod" \
+            -GNinja
 
-          cmake --build . --config Release -j $(nproc)
-
-      - name: 验证纯静态（关键！）
-        working-directory: ./llama.cpp/build
+      - name: Build llama-server
         run: |
-          echo "=== 文件类型 ==="
-          file bin/llama-server
-          echo "=== 动态依赖检查（必须只有 bionic 系统库）==="
-          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-readelf -d bin/llama-server | grep NEEDED || echo "✅ 真正纯静态！"
+          cmake --build build --target llama-server --config Release -j $(nproc)
 
-      - name: Strip 瘦身（体积减 30%+）
-        working-directory: ./llama.cpp/build
+      - name: Prepare Magisk module structure
         run: |
-          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip bin/llama-server
+          # 创建模块根目录
+          MODULE_ROOT="llama-module"
+          mkdir -p "$MODULE_ROOT/META-INF/com/google/android"
+          mkdir -p "$MODULE_ROOT/bin"
 
-      - name: 上传 artifact（单个文件，直接下载）
+          # 复制编译产物 (llama-server 和所有 .so)
+          cp build/bin/llama-server "$MODULE_ROOT/bin/"
+          if [ -d build/lib ]; then
+            cp build/lib/*.so "$MODULE_ROOT/bin/" 2>/dev/null || true
+          fi
+          # 确保所有文件可读
+          chmod -R 755 "$MODULE_ROOT/bin"
+
+      - name: Create META-INF files
+        run: |
+          MODULE_ROOT="llama-module"
+
+          # 下载 Magisk 官方模块安装器作为 update-binary
+          curl -L -o "$MODULE_ROOT/META-INF/com/google/android/update-binary" \
+            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
+          chmod 755 "$MODULE_ROOT/META-INF/com/google/android/update-binary"
+
+          # 创建 updater-script（仅需一个注释）
+          echo "#MAGISK" > "$MODULE_ROOT/META-INF/com/google/android/updater-script"
+
+      - name: Create module.prop
+        run: |
+          MODULE_ROOT="llama-module"
+          cat > "$MODULE_ROOT/module.prop" <<EOF
+          id=llama_server
+          name=llama.cpp Server for Redmi Note 12 Turbo
+          version=v1.0
+          versionCode=1
+          author=GitHub Actions
+          description=llama-server with shared libraries installed to /data/llama
+          EOF
+
+      - name: Create customize.sh (installation script)
+        run: |
+          MODULE_ROOT="llama-module"
+          cat > "$MODULE_ROOT/customize.sh" <<'EOF'
+          #!/system/bin/sh
+
+          # This script runs during module installation
+          # It copies binaries and libraries to /data/llama
+
+          # Create target directory
+          TARGET_DIR="/data/llama"
+          ui_print "- Creating $TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+
+          # Copy all files from module's bin/ to target
+          ui_print "- Copying files to $TARGET_DIR"
+          cp -rf "$MODPATH/bin/." "$TARGET_DIR/"
+
+          # Set permissions
+          ui_print "- Setting permissions"
+          chmod 755 "$TARGET_DIR/llama-server"
+          chmod 644 "$TARGET_DIR/"*.so 2>/dev/null
+
+          ui_print "- Done! Binaries installed to $TARGET_DIR"
+          ui_print "- You can start the server manually: $TARGET_DIR/llama-server"
+          EOF
+          chmod 755 "$MODULE_ROOT/customize.sh"
+
+      - name: Create service.sh (optional auto-start)
+        run: |
+          MODULE_ROOT="llama-module"
+          cat > "$MODULE_ROOT/service.sh" <<'EOF'
+          #!/system/bin/sh
+          # Auto-start script for llama-server (disabled by default)
+          # To enable, uncomment the following lines and adjust the model path.
+
+          # Model file path (modify to your actual .gguf file)
+          MODEL_FILE="/sdcard/Download/model.gguf"
+          LOG_FILE="/data/local/tmp/llama_server.log"
+
+          # Wait for system to settle
+          # sleep 30
+
+          # Start llama-server in background (uncomment to enable)
+          # nohup /data/llama/llama-server \
+          #   -m "$MODEL_FILE" \
+          #   --host 0.0.0.0 --port 8080 \
+          #   -c 2048 \
+          #   > "$LOG_FILE" 2>&1 &
+          EOF
+          chmod 755 "$MODULE_ROOT/service.sh"
+
+      - name: Create ZIP archive
+        run: |
+          cd llama-module
+          zip -r ../llama-server-magisk.zip .
+          cd ..
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-android15-arm64-static
-          path: llama.cpp/build/bin/llama-server
-          if-no-files-found: error
-          retention-days: 30
+          name: llama-server-magisk-module
+          path: llama-server-magisk.zip
