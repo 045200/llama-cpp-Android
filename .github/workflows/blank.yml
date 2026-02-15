@@ -1,7 +1,7 @@
-name: Build llama-server Android arm64 Static (Pure Static)
+name: Build llama-server Android arm64 Static (Pure Static - Fixed)
 
 on:
-  workflow_dispatch:          # 手动触发（推荐）
+  workflow_dispatch:
   push:
     branches: [ "master" ]
   pull_request:
@@ -19,16 +19,16 @@ jobs:
           path: 'llama.cpp'
           fetch-depth: 1
 
-      - name: 安装 Ninja（加速构建）
+      - name: 安装 Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: Setup Android NDK r27c（稳定 + 支持 Android 15）
+      - name: Setup Android NDK r27c（完美支持 Android 15）
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r27c
 
-      - name: CMake 配置 + 编译（纯静态核心）
+      - name: CMake 配置 + 编译（纯静态 + 避坑优化）
         working-directory: ./llama.cpp
         run: |
           mkdir -p build && cd build
@@ -37,33 +37,37 @@ jobs:
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-35 \           # Android 15 必须用 35
-            -DANDROID_STL=c++_static \                # 静态链接 libc++
-            -DBUILD_SHARED_LIBS=OFF \                 # 关闭共享库 → 纯静态
-            -DGGML_OPENMP=OFF \                       # NDK 不支持 OpenMP，强制关闭
+            -DANDROID_PLATFORM=android-35 \
+            -DANDROID_STL=c++_static \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENMP=OFF \
+            -DOpenMP_C_FLAGS="" \
+            -DOpenMP_CXX_FLAGS="" \
+            -DOpenMP_C_LIB_NAMES="" \
             -DLLAMA_BUILD_EXAMPLES=ON \
-            -DLLAMA_BUILD_SERVER=ON \                 # 构建 llama-server
+            -DLLAMA_BUILD_SERVER=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
             -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
-            -DGGML_NATIVE=OFF                         # 避免主机优化污染
-            
+            -DGGML_NATIVE=OFF \
+            -DGGML_LLAMAFILE=OFF
+
           cmake --build . --config Release -j $(nproc)
 
-      - name: 验证纯静态（关键避坑！）
+      - name: 验证纯静态（关键！）
         working-directory: ./llama.cpp/build
         run: |
           echo "=== 文件类型 ==="
           file bin/llama-server
-          echo "=== 动态依赖检查 ==="
-          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-readelf -d bin/llama-server | grep NEEDED || echo "✅ 无动态依赖！真正纯静态"
+          echo "=== 动态依赖检查（必须只有 bionic 系统库）==="
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-readelf -d bin/llama-server | grep NEEDED || echo "✅ 真正纯静态！"
 
-      - name: Strip 瘦身（减小体积 30%+）
+      - name: Strip 瘦身（体积减 30%+）
         working-directory: ./llama.cpp/build
         run: |
           ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip bin/llama-server
 
-      - name: 上传 artifact（直接下载单个文件）
+      - name: 上传 artifact（单个文件，直接下载）
         uses: actions/upload-artifact@v4
         with:
           name: llama-server-android15-arm64-static
