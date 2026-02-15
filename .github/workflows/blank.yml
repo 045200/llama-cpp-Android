@@ -91,7 +91,7 @@ jobs:
             -DLLAMA_BUILD_SERVER=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
           make -j$(nproc) llama-server
-          mv bin/llama-server ../llama-android-arm64-server
+          mv bin/llama-server ../llama-server
 
       # 制作 Magisk/KernelSU 模块（包含两个二进制）
       - name: Prepare Magisk/KernelSU module
