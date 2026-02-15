@@ -48,18 +48,16 @@ jobs:
         run: |
           cmake --build build --target llama-server --config Release -j $(nproc)
 
-      # 从 NDK 复制 libomp.so 以解决运行时依赖
+      # 使用 find 命令查找 libomp.so（解决路径不确定问题）
       - name: Copy libomp.so from NDK
         run: |
           NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
-          # 查找 clang 版本目录（例如 17）
-          CLANG_VERSION_DIR=$(ls "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/" | head -n1)
-          LIBOMP_SRC="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/$CLANG_VERSION_DIR/lib/linux/aarch64/libomp.so"
-          if [ -f "$LIBOMP_SRC" ]; then
-            cp "$LIBOMP_SRC" build/bin/
-            echo "Copied libomp.so to build/bin/"
+          LIBOMP_PATH=$(find "$NDK_PATH" -name "libomp.so" -path "*/aarch64/*" | head -n1)
+          if [ -n "$LIBOMP_PATH" ]; then
+            cp "$LIBOMP_PATH" build/bin/
+            echo "Copied libomp.so from $LIBOMP_PATH"
           else
-            echo "::error::libomp.so not found in NDK path: $LIBOMP_SRC"
+            echo "::error::libomp.so not found in NDK path: $NDK_PATH"
             exit 1
           fi
 
