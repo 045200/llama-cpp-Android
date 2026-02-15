@@ -1,4 +1,4 @@
-name: Build llama-server Magisk Module
+name: Build llama-server Magisk Module (NDK r27, API 31)
 
 on:
   push:
@@ -14,13 +14,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ggerganov/llama.cpp
-          ref: master  # 可以改为特定 tag 或分支
+          ref: master  # 可改为特定标签或分支
 
-      - name: Set up NDK
+      - name: Set up NDK (r27)
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26d
+          ndk-version: r27
           add-to-path: false
 
       - name: Install dependencies
@@ -28,17 +28,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      - name: Configure CMake for Android (arm64-v8a, shared libs)
+      - name: Configure CMake for Android (arm64-v8a, shared libs, API 31)
         run: |
           mkdir -p build
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_PLATFORM=android-31 \
             -DGGML_SHARED=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod" \
+            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod -D_GNU_SOURCE" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod -D_GNU_SOURCE" \
             -GNinja
 
       - name: Build llama-server
@@ -57,18 +57,15 @@ jobs:
           if [ -d build/lib ]; then
             cp build/lib/*.so "$MODULE_ROOT/bin/" 2>/dev/null || true
           fi
-          # 确保所有文件可读
           chmod -R 755 "$MODULE_ROOT/bin"
 
       - name: Create META-INF files
         run: |
           MODULE_ROOT="llama-module"
-
           # 下载 Magisk 官方模块安装器作为 update-binary
           curl -L -o "$MODULE_ROOT/META-INF/com/google/android/update-binary" \
             https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
           chmod 755 "$MODULE_ROOT/META-INF/com/google/android/update-binary"
-
           # 创建 updater-script（仅需一个注释）
           echo "#MAGISK" > "$MODULE_ROOT/META-INF/com/google/android/updater-script"
 
@@ -89,20 +86,16 @@ jobs:
           MODULE_ROOT="llama-module"
           cat > "$MODULE_ROOT/customize.sh" <<'EOF'
           #!/system/bin/sh
-
           # This script runs during module installation
           # It copies binaries and libraries to /data/llama
 
-          # Create target directory
           TARGET_DIR="/data/llama"
           ui_print "- Creating $TARGET_DIR"
           mkdir -p "$TARGET_DIR"
 
-          # Copy all files from module's bin/ to target
           ui_print "- Copying files to $TARGET_DIR"
           cp -rf "$MODPATH/bin/." "$TARGET_DIR/"
 
-          # Set permissions
           ui_print "- Setting permissions"
           chmod 755 "$TARGET_DIR/llama-server"
           chmod 644 "$TARGET_DIR/"*.so 2>/dev/null
@@ -120,11 +113,10 @@ jobs:
           # Auto-start script for llama-server (disabled by default)
           # To enable, uncomment the following lines and adjust the model path.
 
-          # Model file path (modify to your actual .gguf file)
           MODEL_FILE="/sdcard/Download/model.gguf"
           LOG_FILE="/data/local/tmp/llama_server.log"
 
-          # Wait for system to settle
+          # Wait for system to settle (optional)
           # sleep 30
 
           # Start llama-server in background (uncomment to enable)
