@@ -2,8 +2,12 @@ name: Build and Release Android llama.cpp Binary
 
 on:
   schedule:
-    - cron: '0 */12 * * *'  # 每12小时运行一次
-  workflow_dispatch:          # 允许手动触发
+    - cron: '0 */12 * * *'   # 每12小时运行一次
+  workflow_dispatch:           # 允许手动触发
+
+# 关键修复：授予写入权限以创建 Release
+permissions:
+  contents: write
 
 jobs:
   check-and-build:
@@ -175,7 +179,7 @@ jobs:
             llama.cpp/llama-android-arm64
             llama-android-module.zip
 
-      # 创建 GitHub Release
+      # 创建 GitHub Release（现在权限已授予）
       - name: Create GitHub Release
         if: steps.check.outputs.new_release == 'true'
         id: create-release
