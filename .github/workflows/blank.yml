@@ -52,7 +52,6 @@ jobs:
           
           # 方法3: 从 Git 标签获取最新版本（按版本排序）
           echo "Attempt 3: Fetch tags via git ls-remote..."
-          # 获取所有标签，去除 '^{}' 的重复条目，按版本排序，取最后一个
           TAGS=$(git ls-remote --tags https://github.com/${{ env.LLAMA_REPO }}.git | awk '{print $2}' | sed 's|refs/tags/||' | sed 's/\^{}//' | sort -u -V)
           if [ -n "$TAGS" ]; then
             LATEST_TAG=$(echo "$TAGS" | tail -n1)
@@ -61,7 +60,6 @@ jobs:
             exit 0
           fi
           
-          # 所有方法均失败
           echo "Failed to fetch latest tag using all methods."
           echo "latest_tag=" >> $GITHUB_OUTPUT
 
@@ -122,7 +120,8 @@ jobs:
             -DANDROID_PLATFORM=android-${{ env.ANDROID_PLATFORM }} \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_MAKE_PROGRAM=ninja \
-            -GNinja
+            -GNinja \
+            -DLLAMA_BUILD_TESTS=OFF
 
       - name: Build
         working-directory: llama.cpp
