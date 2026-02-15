@@ -5,7 +5,6 @@ on:
     - cron: '0 */12 * * *'   # 每12小时运行一次
   workflow_dispatch:           # 允许手动触发
 
-# 关键修复：授予写入权限以创建 Release
 permissions:
   contents: write
 
@@ -34,12 +33,19 @@ jobs:
           fi
           echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-      # 与本地记录版本比较，决定是否需要构建
-      - name: Check for new release
+      # 与本地记录版本比较，同时处理手动触发强制构建
+      - name: Check for new release or manual trigger
         id: check
         run: |
-          CURRENT=$(cat current_llama_version.txt 2>/dev/null || echo "none")
           LATEST="${{ steps.get-release.outputs.latest_tag }}"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "手动触发，强制构建最新版本 $LATEST"
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$LATEST" >> "$GITHUB_OUTPUT"
+            echo "$LATEST" > current_llama_version.txt
+            exit 0
+          fi
+          CURRENT=$(cat current_llama_version.txt 2>/dev/null || echo "none")
           echo "当前记录版本: $CURRENT"
           echo "最新上游版本: $LATEST"
           if [ "$LATEST" != "$CURRENT" ]; then
@@ -52,14 +58,6 @@ jobs:
             echo "new_release=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # 手动触发时强制构建（使用最新标签）
-      - name: Override for manual trigger
-        if: github.event_name == 'workflow_dispatch' && steps.check.outputs.new_release == 'false'
-        run: |
-          echo "手动触发：强制使用最新标签 ${{ steps.get-release.outputs.latest_tag }} 进行构建"
-          echo "new_release=true" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${{ steps.get-release.outputs.latest_tag }}" >> "$GITHUB_OUTPUT"
-
       # 检出对应标签的 llama.cpp 源码
       - name: Checkout llama.cpp
         if: steps.check.outputs.new_release == 'true'
@@ -68,7 +66,7 @@ jobs:
           cd llama.cpp
           git checkout ${{ steps.check.outputs.release_tag }}
 
-      # 设置 Android NDK r27d（通过主版本 r27 指定，setup-ndk 会自动处理修订版）
+      # 设置 Android NDK r27d（通过主版本 r27 指定）
       - name: Set up Android NDK
         if: steps.check.outputs.new_release == 'true'
         uses: nttld/setup-ndk@v1
@@ -76,8 +74,8 @@ jobs:
           ndk-version: r27
           add-to-path: true
 
-      # 编译 llama-cli 为 Android arm64 二进制（API 级别 31 = Android 12）
-      - name: Build llama.cpp for Android arm64
+      # 编译 llama-cli 和 llama-server 为 Android arm64 静态链接二进制（API 31 = Android 12）
+      - name: Build llama.cpp for Android arm64 (static)
         if: steps.check.outputs.new_release == 'true'
         working-directory: llama.cpp
         run: |
@@ -88,18 +86,21 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-31 \
             -DCMAKE_C_FLAGS="-O3 -DNDEBUG" \
-            -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG"
-          make -j$(nproc) llama-cli
-          mv bin/llama-cli ../llama-android-arm64
+            -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
+            -DLLAMA_STATIC=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          make -j$(nproc) llama-server
+          mv bin/llama-server ../llama-android-arm64-server
 
-      # 制作 Magisk/KernelSU 模块
+      # 制作 Magisk/KernelSU 模块（包含两个二进制）
       - name: Prepare Magisk/KernelSU module
         if: steps.check.outputs.new_release == 'true'
         run: |
           MODULE_DIR="module"
-          BIN_DIR="$MODULE_DIR/system/bin"
+          BIN_DIR="$MODULE_DIR/bin"
           mkdir -p "$BIN_DIR"
-          cp llama.cpp/llama-android-arm64 "$BIN_DIR/llama"
+          cp llama.cpp/llama-server "$BIN_DIR/llama-server"
 
           # 创建 module.prop
           cat > "$MODULE_DIR/module.prop" <<EOF
@@ -108,24 +109,19 @@ jobs:
           version=${{ steps.check.outputs.release_tag }}
           versionCode=1
           author=GitHub Actions
-          description=llama.cpp 预编译二进制，适用于 Android arm64 (API 31+)
+          description=llama.cpp 预编译二进制（静态链接），适用于 Android arm64 (API 31+)
           EOF
 
           # 创建 customize.sh（安装时运行，提供模型下载指引）
           cat > "$MODULE_DIR/customize.sh" <<'EOF'
           #!/system/bin/sh
-          # 注意：此脚本在 Magisk/KernelSU 模块安装时执行，此时处于非交互环境
-          # 音量键选择无法工作，因此此处仅创建下载脚本，并提示用户手动运行
-
-          MODEL_DIR="/data/local/llama_models"
+          MODEL_DIR="/data/llama_models"
           DOWNLOAD_SCRIPT="$MODEL_DIR/download_model.sh"
 
           mkdir -p "$MODEL_DIR"
 
-          # 生成独立的下载脚本，用户可通过 adb 或终端执行
           cat > "$DOWNLOAD_SCRIPT" <<'INNEREOF'
           #!/system/bin/sh
-          # 模型下载脚本 - 请使用 adb shell 或终端执行
           echo "选择要下载的模型："
           echo "1) DeepSeek-R1-Distill-Qwen-1.5B (Q4_K_M)"
           echo "2) Qwen2.5-1.5B-Instruct (Q4_K_M)"
@@ -155,11 +151,13 @@ jobs:
           echo "开始下载 $FILE ..."
           curl -L "$URL" -o "$MODEL_DIR/$FILE"
           echo "下载完成：$MODEL_DIR/$FILE"
+          echo "可使用命令：llama -m $MODEL_DIR/$FILE ... 或 llama-server -m $MODEL_DIR/$FILE ..."
           INNEREOF
 
           chmod 755 "$DOWNLOAD_SCRIPT"
           echo "模块安装完成！模型下载脚本已放置于：$DOWNLOAD_SCRIPT"
           echo "请使用 'adb shell sh $DOWNLOAD_SCRIPT' 或直接在设备终端运行该脚本下载模型。"
+          echo "二进制位置：/system/bin/llama (CLI) 和 /system/bin/llama-server (服务器)"
           EOF
 
           chmod 755 "$MODULE_DIR/customize.sh"
@@ -169,17 +167,18 @@ jobs:
           zip -r ../llama-android-module.zip ./*
           cd ..
 
-      # 上传构建产物（二进制和模块）
+      # 上传构建产物（两个二进制和模块）
       - name: Upload artifacts
         if: steps.check.outputs.new_release == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: llama-android-build-${{ steps.check.outputs.release_tag }}
           path: |
-            llama.cpp/llama-android-arm64
+            llama.cpp/llama-android-arm64-cli
+            llama.cpp/llama-android-arm64-server
             llama-android-module.zip
 
-      # 创建 GitHub Release（现在权限已授予）
+      # 创建 GitHub Release
       - name: Create GitHub Release
         if: steps.check.outputs.new_release == 'true'
         id: create-release
@@ -190,23 +189,36 @@ jobs:
           tag_name: ${{ steps.check.outputs.release_tag }}-android
           release_name: llama.cpp Android ${{ steps.check.outputs.release_tag }}
           body: |
-            编译目标：Android arm64，最低 API 级别 31 (Android 12+)
+            编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**静态链接**（无外部 .so 依赖）
             包含文件：
-            - `llama-android-arm64`：独立的可执行二进制文件
-            - `llama-android-module.zip`：Magisk/KernelSU 模块，安装后二进制位于 `/system/bin/llama`，并提供模型下载脚本（路径见模块内提示）
+            - `llama-android-arm64-cli`：命令行交互工具
+            - `llama-android-arm64-server`：HTTP 服务器（兼容 OpenAI API）
+            - `llama-android-module-${{ steps.check.outputs.release_tag }}.zip`：Magisk/KernelSU 模块，安装后二进制位于 `/system/bin/llama` 和 `/system/bin/llama-server`，并提供模型下载脚本。
           draft: false
           prerelease: false
 
-      # 上传二进制到 Release
-      - name: Upload binary to release
+      # 上传 CLI 二进制到 Release
+      - name: Upload CLI binary to release
         if: steps.check.outputs.new_release == 'true'
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: llama.cpp/llama-android-arm64
-          asset_name: llama-android-arm64
+          asset_path: llama.cpp/llama-android-arm64-cli
+          asset_name: llama-android-arm64-cli
+          asset_content_type: application/octet-stream
+
+      # 上传 Server 二进制到 Release
+      - name: Upload Server binary to release
+        if: steps.check.outputs.new_release == 'true'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: llama.cpp/llama-android-arm64-server
+          asset_name: llama-android-arm64-server
           asset_content_type: application/octet-stream
 
       # 上传模块到 Release
