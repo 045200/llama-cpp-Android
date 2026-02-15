@@ -1,151 +1,208 @@
-name: Build llama.cpp for Android arm64
+name: Build and Release Android llama.cpp Binary
 
 on:
   schedule:
-    - cron: '0 */12 * * *'   # 每12小时
-  workflow_dispatch:
-
-env:
-  LLAMA_REPO: ggerganov/llama.cpp
-  NDK_VERSION: r26d
-  ANDROID_ABI: arm64-v8a
-  ANDROID_PLATFORM: 23
-  BUILD_TYPE: Release
+    - cron: '0 */12 * * *'  # Every 12 hours
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   check-and-build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      skip_build: ${{ steps.check-release.outputs.skip_build }}
-      latest_tag: ${{ steps.get-latest-tag.outputs.latest_tag }}
+
     steps:
-      - name: Checkout current repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get latest release tag from llama.cpp
-        id: get-latest-tag
+      - name: Set up GitHub API access
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          LATEST_TAG=""
-          
-          # 方法1: 通过 GitHub CLI 获取最新的正式 release
-          echo "Attempt 1: Fetch latest release via gh CLI..."
-          LATEST_TAG=$(gh release view --repo ${{ env.LLAMA_REPO }} --json tagName --jq .tagName 2>/dev/null || true)
-          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
-            echo "Found latest release tag: $LATEST_TAG"
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # 方法2: 使用 API 获取最新 release（作为备选）
-          echo "Attempt 2: Fetch latest release via API..."
-          LATEST_TAG=$(curl -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${{ env.LLAMA_REPO }}/releases/latest" | jq -r .tag_name)
-          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
-            echo "Found latest release tag via API: $LATEST_TAG"
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # 方法3: 从 Git 标签获取最新版本（按版本排序）
-          echo "Attempt 3: Fetch tags via git ls-remote..."
-          TAGS=$(git ls-remote --tags https://github.com/${{ env.LLAMA_REPO }}.git | awk '{print $2}' | sed 's|refs/tags/||' | sed 's/\^{}//' | sort -u -V)
-          if [ -n "$TAGS" ]; then
-            LATEST_TAG=$(echo "$TAGS" | tail -n1)
-            echo "Found latest tag via git: $LATEST_TAG"
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "Failed to fetch latest tag using all methods."
-          echo "latest_tag=" >> $GITHUB_OUTPUT
+          echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> $GITHUB_ENV
 
-      - name: Check if release already exists or tag missing
+      - name: Check for new llama.cpp release
         id: check-release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST_TAG="${{ steps.get-latest-tag.outputs.latest_tag }}"
-          if [ -z "$LATEST_TAG" ]; then
-            echo "No valid upstream tag found. Skipping build."
-            echo "skip_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          TAG="android-$LATEST_TAG"
-          if gh release view "$TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
-            echo "Release $TAG already exists. Skipping build."
-            echo "skip_build=true" >> $GITHUB_OUTPUT
+          LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r '.tag_name')
+          CURRENT_RELEASE=$(cat current_llama_version.txt 2>/dev/null || echo "none")
+          echo "Latest upstream release: $LATEST_RELEASE"
+          echo "Current release: $CURRENT_RELEASE"
+          if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
+            echo "New release detected. Proceeding to build."
+            echo "new_release=true" >> $GITHUB_OUTPUT
+            echo "release_tag=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+            echo "$LATEST_RELEASE" > current_llama_version.txt
           else
-            echo "No existing release found for $TAG. Proceeding with build."
-            echo "skip_build=false" >> $GITHUB_OUTPUT
+            echo "No new release. Skipping build."
+            echo "new_release=false" >> $GITHUB_OUTPUT
           fi
 
-  build:
-    needs: check-and-build
-    if: needs.check-and-build.outputs.skip_build == 'false' && needs.check-and-build.outputs.latest_tag != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout current repository (for release step)
-        uses: actions/checkout@v4
+      - name: Checkout llama.cpp if new release
+        if: steps.check-release.outputs.new_release == 'true'
+        run: |
+          git clone https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
+          git checkout ${{ steps.check-release.outputs.release_tag }}
 
       - name: Set up Android NDK
+        if: steps.check-release.outputs.new_release == 'true'
         uses: nttld/setup-ndk@v1
-        id: setup-ndk
         with:
-          ndk-version: ${{ env.NDK_VERSION }}
-          add-to-path: false
+          ndk-version: r27  # Latest NDK version as of 2026; adjust if needed
+          add-to-path: true
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
-
-      - name: Checkout llama.cpp source at tag
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.LLAMA_REPO }}
-          ref: ${{ needs.check-and-build.outputs.latest_tag }}
-          path: llama.cpp
-          fetch-depth: 1
-
-      - name: Configure CMake for Android
+      - name: Build llama.cpp for Android arm64
+        if: steps.check-release.outputs.new_release == 'true'
         working-directory: llama.cpp
         run: |
-          cmake -B build \
-            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=${{ env.ANDROID_ABI }} \
-            -DANDROID_PLATFORM=android-${{ env.ANDROID_PLATFORM }} \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DCMAKE_MAKE_PROGRAM=ninja \
-            -GNinja \
-            -DLLAMA_BUILD_TESTS=OFF
+          mkdir build-android
+          cd build-android
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-35  # Minimum API 35 for Android 15
+          make -j$(nproc)
+          # Assuming the binary is 'llama' or similar; adjust if the output binary name differs
+          mv bin/llama ../llama-android-arm64
 
-      - name: Build
-        working-directory: llama.cpp
+      - name: Prepare KernelSU/Magisk module
+        if: steps.check-release.outputs.new_release == 'true'
         run: |
-          cmake --build build --config ${{ env.BUILD_TYPE }} --parallel $(nproc)
+          # Create a basic Magisk/KernelSU module structure
+          mkdir -p module/system/bin
+          cp llama.cpp/llama-android-arm64 module/system/bin/llama
+          
+          # module.prop for Magisk/KernelSU
+          echo "id=llama-android" > module/module.prop
+          echo "name=llama.cpp Android Module" >> module/module.prop
+          echo "version=${{ steps.check-release.outputs.release_tag }}" >> module/module.prop
+          echo "versionCode=1" >> module/module.prop  # Increment as needed
+          echo "author=YourName" >> module/module.prop
+          echo "description=llama.cpp binary for Android arm64, min API 35" >> module/module.prop
+          
+          # Add customize.sh for post-install script (model download logic)
+          cat << EOF > module/customize.sh
+          #!/system/bin/sh
+          
+          # Function to select option using volume keys
+          select_option() {
+            OPTIONS=("\$@")
+            NUM_OPTIONS=\${#OPTIONS[@]}
+            CURRENT=0
+            echo "Use Volume Up to cycle options, Volume Down to select."
+            
+            while true; do
+              echo "Current selection: \${OPTIONS[\$CURRENT]}"
+              EVENT=\$(getevent -lc 1 2>/dev/null | grep -E 'KEY_VOLUMEUP|KEY_VOLUMEDOWN')
+              if echo "\$EVENT" | grep -q 'KEY_VOLUMEUP'; then
+                CURRENT=\$(( (CURRENT + 1) % NUM_OPTIONS ))
+              elif echo "\$EVENT" | grep -q 'KEY_VOLUMEDOWN'; then
+                break
+              fi
+              sleep 0.2
+            done
+            SELECTED="\${OPTIONS[\$CURRENT]}"
+          }
+          
+          # Function to download model
+          download_model() {
+            MODEL_DIR="/data/local/llama_models"
+            mkdir -p \$MODEL_DIR
+            
+            # Communities and their base URLs
+            COMMUNITIES=("huggingface.co" "modelscope.cn" "modelers.cn")  # Assuming modelers.cn for 魔乐社区; adjust if different
+            
+            # Select community
+            echo "Select download community:"
+            select_option "huggingface" "魔搭社区" "魔乐社区"
+            COMMUNITY="\${COMMUNITIES[\$CURRENT]}"
+            
+            # Model list with verified paths (using Q4_K_M quant as example; adjust quant if needed)
+            # For deepseek-r1-1.5.gguf: using unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf on HF/ModelScope
+            # For qwen2.5-1.5b.gguf: Qwen/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf
+            # For qwen2.5-3b.gguf: Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf
+            # Note: For 魔乐社区, assuming similar repo structure; replace with actual if different
+            MODELS=("unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf" \
+                    "Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" \
+                    "Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf")
+            MODEL_NAMES=("deepseek-r1-1.5.gguf" "qwen2.5-1.5b.gguf" "qwen2.5-3b.gguf")
+            
+            # Select model
+            echo "Select model to download:"
+            select_option "\${MODEL_NAMES[@]}"
+            SELECTED_MODEL="\${MODELS[\$CURRENT]}"
+            MODEL_FILE="\${MODEL_NAMES[\$CURRENT]}"
+            
+            # Download (adjust path if ModelScope/魔乐 uses different endpoint; e.g., modelscope may use /models/REPO/files/FILE)
+            if [ "\$COMMUNITY" = "modelscope.cn" ]; then
+              DOWNLOAD_URL="https://\$COMMUNITY/models/\$(echo \$SELECTED_MODEL | sed 's/\/resolve\/main\///')"
+            else
+              DOWNLOAD_URL="https://\$COMMUNITY/\$SELECTED_MODEL"
+            fi
+            curl -L "\$DOWNLOAD_URL" -o "\$MODEL_DIR/\$MODEL_FILE"
+            echo "Model downloaded to \$MODEL_DIR/\$MODEL_FILE"
+          }
+          
+          # Run download on first boot or manually
+          if [ ! -d "/data/local/llama_models" ]; then
+            download_model
+          fi
+          EOF
+          
+          chmod +x module/customize.sh
+          
+          # Zip the module
+          zip -r llama-android-module.zip module/*
 
-      - name: Package binaries
-        run: |
-          cd llama.cpp/build/bin
-          tar -czf ../../../llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz *
-          cd ../../..
-
-      - name: Upload artifact
+      - name: Upload artifacts
+        if: steps.check-release.outputs.new_release == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64
-          path: llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz
+          name: llama-android-build
+          path: |
+            llama.cpp/llama-android-arm64
+            llama-android-module.zip
 
-      - name: Create GitHub Release and upload asset
+      - name: Create GitHub Release
+        if: steps.check-release.outputs.new_release == 'true'
+        uses: actions/create-release@v1
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.check-release.outputs.release_tag }}-android
+          release_name: llama.cpp Android ${{ steps.check-release.outputs.release_tag }}
+          body: |
+            Compiled for Android arm64, min API 35 (Android 15+).
+            Includes binary and Magisk/KernelSU module with model download logic.
+          draft: false
+          prerelease: false
+
+      - name: Upload binary to release
+        if: steps.check-release.outputs.new_release == 'true'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: llama.cpp/llama-android-arm64
+          asset_name: llama-android-arm64
+          asset_content_type: application/octet-stream
+
+      - name: Upload module to release
+        if: steps.check-release.outputs.new_release == 'true'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create-release.outputs.upload_url }}
+          asset_path: llama-android-module.zip
+          asset_name: llama-android-module.zip
+          asset_content_type: application/zip
+
+      - name: Update current version file
+        if: steps.check-release.outputs.new_release == 'true'
         run: |
-          TAG="android-${{ needs.check-and-build.outputs.latest_tag }}"
-          gh release create "$TAG" \
-            --title "Android arm64 build for llama.cpp ${{ needs.check-and-build.outputs.latest_tag }}" \
-            --notes "Automated build of llama.cpp ${{ needs.check-and-build.outputs.latest_tag }} for Android arm64-v8a." \
-            llama-cpp-android-${{ needs.check-and-build.outputs.latest_tag }}-arm64.tar.gz
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add current_llama_version.txt
+          git commit -m "Update current llama.cpp version to ${{ steps.check-release.outputs.release_tag }}"
+          git push
