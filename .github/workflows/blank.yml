@@ -22,9 +22,24 @@ jobs:
       - name: Check for new llama.cpp release
         id: check-release
         run: |
-          LATEST_RELEASE=$(curl -s -f -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r '.tag_name')
-          if [ $? -ne 0 ] || [ "$LATEST_RELEASE" = "null" ] || [ -z "$LATEST_RELEASE" ]; then
-            echo "Failed to fetch latest release tag."
+          attempt=0
+          max_attempts=3
+          while [ $attempt -lt $max_attempts ]; do
+            response=$(curl -s -H "Accept: application/vnd.github.v3+json" -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest)
+            LATEST_RELEASE=$(echo "$response" | jq -r '.tag_name // "null"' 2>/dev/null)
+            if [ "$LATEST_RELEASE" != "null" ] && [ -n "$LATEST_RELEASE" ]; then
+              break
+            fi
+            if echo "$response" | grep -iq "rate limit"; then
+              echo "Rate limit hit. Retrying after 60 seconds."
+              sleep 60
+            else
+              sleep 5
+            fi
+            attempt=$((attempt + 1))
+          done
+          if [ "$LATEST_RELEASE" = "null" ] || [ -z "$LATEST_RELEASE" ]; then
+            echo "Failed to fetch latest release tag after retries."
             echo "new_release=false" >> $GITHUB_OUTPUT
           else
             CURRENT_RELEASE=$(cat current_llama_version.txt 2>/dev/null || echo "none")
@@ -65,9 +80,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-35  # Minimum API 35 for Android 15
-          make -j$(nproc)
-          # The CLI binary is 'main'; rename to llama-android-arm64
-          mv bin/main ../llama-android-arm64
+          make -j$(nproc) llama-cli
+          # The CLI binary is 'llama-cli'; rename to llama-android-arm64
+          mv bin/llama-cli ../llama-android-arm64
 
       - name: Prepare KernelSU/Magisk module
         if: steps.check-release.outputs.new_release == 'true'
@@ -114,7 +129,7 @@ jobs:
             mkdir -p \$MODEL_DIR
             
             # Communities and their base URLs
-            COMMUNITIES=("huggingface.co" "modelscope.cn" "modelers.cn")  # 魔搭: modelscope.cn, 魔乐: modelers.cn
+            COMMUNITIES=("huggingface.co" "modelscope.cn" "modelers.csdn.net")  # 魔搭: modelscope.cn, 魔乐: modelers.csdn.net (updated domain)
             
             # Select community
             echo "Select download community:"
@@ -134,13 +149,13 @@ jobs:
             MODEL_FILE="\${MODEL_NAMES[\$CURRENT]}"
             
             # Download URL adjustment based on community
-            if [ "\$COMMUNITY" != "huggingface.co" ]; then
+            if [ "\$COMMUNITY" = "huggingface.co" ]; then
+              DOWNLOAD_URL="https://\$COMMUNITY/\$SELECTED_MODEL"
+            else
               REPO_OWNER=\$(echo \$SELECTED_MODEL | cut -d/ -f1)
               REPO_NAME=\$(echo \$SELECTED_MODEL | cut -d/ -f2)
-              FILE_PATH=\$(echo \$SELECTED_MODEL | cut -d/ -f5-)
-              DOWNLOAD_URL="https://\$COMMUNITY/api/v1/models/\$REPO_OWNER/\$REPO_NAME/repo?Revision=main&FilePath=\$FILE_PATH"
-            else
-              DOWNLOAD_URL="https://\$COMMUNITY/\$SELECTED_MODEL"
+              FILE_PATH=\$(echo \$SELECTED_MODEL | sed 's|.*/resolve/main/||')
+              DOWNLOAD_URL="https://\$COMMUNITY/api/v1/models/\$REPO_OWNER/\$REPO_NAME/repo?Revision=master&File=\$FILE_PATH"
             fi
             curl -L "\$DOWNLOAD_URL" -o "\$MODEL_DIR/\$MODEL_FILE"
             echo "Model downloaded to \$MODEL_DIR/\$MODEL_FILE"
