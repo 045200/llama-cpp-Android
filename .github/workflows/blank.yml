@@ -22,18 +22,23 @@ jobs:
       - name: Check for new llama.cpp release
         id: check-release
         run: |
-          LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r '.tag_name')
-          CURRENT_RELEASE=$(cat current_llama_version.txt 2>/dev/null || echo "none")
-          echo "Latest upstream release: $LATEST_RELEASE"
-          echo "Current release: $CURRENT_RELEASE"
-          if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
-            echo "New release detected. Proceeding to build."
-            echo "new_release=true" >> $GITHUB_OUTPUT
-            echo "release_tag=$LATEST_RELEASE" >> $GITHUB_OUTPUT
-            echo "$LATEST_RELEASE" > current_llama_version.txt
-          else
-            echo "No new release. Skipping build."
+          LATEST_RELEASE=$(curl -s -f -H "Authorization: token ${{ env.GITHUB_TOKEN }}" https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r '.tag_name')
+          if [ $? -ne 0 ] || [ "$LATEST_RELEASE" = "null" ] || [ -z "$LATEST_RELEASE" ]; then
+            echo "Failed to fetch latest release tag."
             echo "new_release=false" >> $GITHUB_OUTPUT
+          else
+            CURRENT_RELEASE=$(cat current_llama_version.txt 2>/dev/null || echo "none")
+            echo "Latest upstream release: $LATEST_RELEASE"
+            echo "Current release: $CURRENT_RELEASE"
+            if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
+              echo "New release detected. Proceeding to build."
+              echo "new_release=true" >> $GITHUB_OUTPUT
+              echo "release_tag=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+              echo "$LATEST_RELEASE" > current_llama_version.txt
+            else
+              echo "No new release. Skipping build."
+              echo "new_release=false" >> $GITHUB_OUTPUT
+            fi
           fi
 
       - name: Checkout llama.cpp if new release
@@ -61,8 +66,8 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-35  # Minimum API 35 for Android 15
           make -j$(nproc)
-          # Assuming the binary is 'llama' or similar; adjust if the output binary name differs
-          mv bin/llama ../llama-android-arm64
+          # The CLI binary is 'main'; rename to llama-android-arm64
+          mv bin/main ../llama-android-arm64
 
       - name: Prepare KernelSU/Magisk module
         if: steps.check-release.outputs.new_release == 'true'
@@ -83,7 +88,7 @@ jobs:
           cat << EOF > module/customize.sh
           #!/system/bin/sh
           
-          # Function to select option using volume keys
+          # Function to select option using volume keys (assumes run in interactive shell like adb or recovery)
           select_option() {
             OPTIONS=("\$@")
             NUM_OPTIONS=\${#OPTIONS[@]}
@@ -109,18 +114,14 @@ jobs:
             mkdir -p \$MODEL_DIR
             
             # Communities and their base URLs
-            COMMUNITIES=("huggingface.co" "modelscope.cn" "modelers.cn")  # Assuming modelers.cn for 魔乐社区; adjust if different
+            COMMUNITIES=("huggingface.co" "modelscope.cn" "modelers.cn")  # 魔搭: modelscope.cn, 魔乐: modelers.cn
             
             # Select community
             echo "Select download community:"
             select_option "huggingface" "魔搭社区" "魔乐社区"
             COMMUNITY="\${COMMUNITIES[\$CURRENT]}"
             
-            # Model list with verified paths (using Q4_K_M quant as example; adjust quant if needed)
-            # For deepseek-r1-1.5.gguf: using unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf on HF/ModelScope
-            # For qwen2.5-1.5b.gguf: Qwen/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf
-            # For qwen2.5-3b.gguf: Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf
-            # Note: For 魔乐社区, assuming similar repo structure; replace with actual if different
+            # Model list with verified paths (using Q4_K_M quant as example)
             MODELS=("unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf" \
                     "Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" \
                     "Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf")
@@ -132,9 +133,12 @@ jobs:
             SELECTED_MODEL="\${MODELS[\$CURRENT]}"
             MODEL_FILE="\${MODEL_NAMES[\$CURRENT]}"
             
-            # Download (adjust path if ModelScope/魔乐 uses different endpoint; e.g., modelscope may use /models/REPO/files/FILE)
-            if [ "\$COMMUNITY" = "modelscope.cn" ]; then
-              DOWNLOAD_URL="https://\$COMMUNITY/models/\$(echo \$SELECTED_MODEL | sed 's/\/resolve\/main\///')"
+            # Download URL adjustment based on community
+            if [ "\$COMMUNITY" != "huggingface.co" ]; then
+              REPO_OWNER=\$(echo \$SELECTED_MODEL | cut -d/ -f1)
+              REPO_NAME=\$(echo \$SELECTED_MODEL | cut -d/ -f2)
+              FILE_PATH=\$(echo \$SELECTED_MODEL | cut -d/ -f5-)
+              DOWNLOAD_URL="https://\$COMMUNITY/api/v1/models/\$REPO_OWNER/\$REPO_NAME/repo?Revision=main&FilePath=\$FILE_PATH"
             else
               DOWNLOAD_URL="https://\$COMMUNITY/\$SELECTED_MODEL"
             fi
@@ -142,7 +146,7 @@ jobs:
             echo "Model downloaded to \$MODEL_DIR/\$MODEL_FILE"
           }
           
-          # Run download on first boot or manually
+          # Run download on first boot or manually (note: for interactive key input, run manually via adb shell)
           if [ ! -d "/data/local/llama_models" ]; then
             download_model
           fi
@@ -164,6 +168,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.check-release.outputs.new_release == 'true'
+        id: create-release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
