@@ -1,225 +1,72 @@
-name: Build and Release Android llama.cpp Binary
+name: Build llama-server Android arm64 Static (Pure Static)
 
 on:
-  schedule:
-    - cron: '0 */12 * * *'   # 每12小时运行一次
-  workflow_dispatch:           # 允许手动触发
-
-permissions:
-  contents: write
+  workflow_dispatch:          # 手动触发（推荐）
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
 
 jobs:
-  check-and-build:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout llama.cpp (最新主线)
         uses: actions/checkout@v4
-
-      # 获取 llama.cpp 最新正式版标签（排除预发布版）
-      - name: Get latest llama.cpp release tag
-        id: get-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          LATEST_TAG=$(gh release list \
-            --repo ggerganov/llama.cpp \
-            --limit 1 \
-            --exclude-pre-releases \
-            --json tagName \
-            --jq '.[0].tagName')
-          if [ -z "$LATEST_TAG" ]; then
-            echo "错误：无法获取最新正式版标签"
-            exit 1
-          fi
-          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
-
-      # 与本地记录版本比较，同时处理手动触发强制构建
-      - name: Check for new release or manual trigger
-        id: check
-        run: |
-          LATEST="${{ steps.get-release.outputs.latest_tag }}"
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "手动触发，强制构建最新版本 $LATEST"
-            echo "new_release=true" >> "$GITHUB_OUTPUT"
-            echo "release_tag=$LATEST" >> "$GITHUB_OUTPUT"
-            echo "$LATEST" > current_llama_version.txt
-            exit 0
-          fi
-          CURRENT=$(cat current_llama_version.txt 2>/dev/null || echo "none")
-          echo "当前记录版本: $CURRENT"
-          echo "最新上游版本: $LATEST"
-          if [ "$LATEST" != "$CURRENT" ]; then
-            echo "发现新版本，准备构建"
-            echo "new_release=true" >> "$GITHUB_OUTPUT"
-            echo "release_tag=$LATEST" >> "$GITHUB_OUTPUT"
-            echo "$LATEST" > current_llama_version.txt
-          else
-            echo "无新版本，跳过构建"
-            echo "new_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # 检出对应标签的 llama.cpp 源码
-      - name: Checkout llama.cpp
-        if: steps.check.outputs.new_release == 'true'
-        run: |
-          git clone https://github.com/ggerganov/llama.cpp.git
-          cd llama.cpp
-          git checkout ${{ steps.check.outputs.release_tag }}
-
-      # 设置 Android NDK r27d（通过主版本 r27 指定）
-      - name: Set up Android NDK
-        if: steps.check.outputs.new_release == 'true'
-        uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27
-          add-to-path: true
+          repository: 'ggml-org/llama.cpp'
+          path: 'llama.cpp'
+          fetch-depth: 1
 
-      # 编译 llama-cli 和 llama-server 为 Android arm64 完全静态二进制（API 31 = Android 12）
-      - name: Build llama.cpp for Android arm64 (fully static, no OpenMP)
-        if: steps.check.outputs.new_release == 'true'
-        working-directory: llama.cpp
+      - name: 安装 Ninja（加速构建）
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Setup Android NDK r27c（稳定 + 支持 Android 15）
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+
+      - name: CMake 配置 + 编译（纯静态核心）
+        working-directory: ./llama.cpp
         run: |
-          mkdir build-android
-          cd build-android
+          mkdir -p build && cd build
+          
           cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-31 \
-            -DCMAKE_C_FLAGS="-O3 -DNDEBUG" \
-            -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
-            -DLLAMA_STATIC=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DLLAMA_OPENMP=OFF \                     # 关键：禁用 OpenMP，避免 libomp.so 依赖
-            -DLLAMA_BUILD_SERVER=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
-          make -j$(nproc) llama-cli llama-server
-          # 重命名并移动到上层目录
-          mv bin/llama-cli ../llama-android-arm64-cli
-          mv bin/llama-server ../llama-android-arm64-server
+            -DANDROID_PLATFORM=android-35 \           # Android 15 必须用 35
+            -DANDROID_STL=c++_static \                # 静态链接 libc++
+            -DBUILD_SHARED_LIBS=OFF \                 # 关闭共享库 → 纯静态
+            -DGGML_OPENMP=OFF \                       # NDK 不支持 OpenMP，强制关闭
+            -DLLAMA_BUILD_EXAMPLES=ON \
+            -DLLAMA_BUILD_SERVER=ON \                 # 构建 llama-server
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod -mtune=cortex-a710" \
+            -DGGML_NATIVE=OFF                         # 避免主机优化污染
+            
+          cmake --build . --config Release -j $(nproc)
 
-      # 制作 Magisk/KernelSU 模块（包含两个二进制）
-      - name: Prepare Magisk/KernelSU module
-        if: steps.check.outputs.new_release == 'true'
+      - name: 验证纯静态（关键避坑！）
+        working-directory: ./llama.cpp/build
         run: |
-          MODULE_DIR="module"
-          BIN_DIR="$MODULE_DIR/bin"
-          mkdir -p "$BIN_DIR"
-          cp llama.cpp/llama-android-arm64-cli "$BIN_DIR/llama"
-          cp llama.cpp/llama-android-arm64-server "$BIN_DIR/llama-server"
+          echo "=== 文件类型 ==="
+          file bin/llama-server
+          echo "=== 动态依赖检查 ==="
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-readelf -d bin/llama-server | grep NEEDED || echo "✅ 无动态依赖！真正纯静态"
 
-          # 创建 module.prop
-          cat > "$MODULE_DIR/module.prop" <<EOF
-          id=llama-android
-          name=llama.cpp Android 模块
-          version=${{ steps.check.outputs.release_tag }}
-          versionCode=1
-          author=GitHub Actions
-          description=llama.cpp 预编译二进制（完全静态链接，无 OpenMP），适用于 Android arm64 (API 31+)
-          EOF
+      - name: Strip 瘦身（减小体积 30%+）
+        working-directory: ./llama.cpp/build
+        run: |
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip bin/llama-server
 
-          # 创建 customize.sh（安装时运行，提供模型下载指引）
-          cat > "$MODULE_DIR/customize.sh" <<'EOF'
-          #!/system/bin/sh
-          MODEL_DIR="/data/llama_models"
-          DOWNLOAD_SCRIPT="$MODEL_DIR/download_model.sh"
-
-          mkdir -p "$MODEL_DIR"
-
-          cat > "$DOWNLOAD_SCRIPT" <<'INNEREOF'
-          #!/system/bin/sh
-          echo "选择要下载的模型："
-          echo "1) DeepSeek-R1-Distill-Qwen-1.5B (Q4_K_M)"
-          echo "2) Qwen2.5-1.5B-Instruct (Q4_K_M)"
-          echo "3) Qwen2.5-3B-Instruct (Q4_K_M)"
-          echo "请输入数字 (1-3): "
-          read choice
-
-          case $choice in
-            1)
-              URL="https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"
-              FILE="deepseek-r1-1.5b.q4_k_m.gguf"
-              ;;
-            2)
-              URL="https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-              FILE="qwen2.5-1.5b-instruct.q4_k_m.gguf"
-              ;;
-            3)
-              URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
-              FILE="qwen2.5-3b-instruct.q4_k_m.gguf"
-              ;;
-            *)
-              echo "无效选择"
-              exit 1
-              ;;
-          esac
-
-          echo "开始下载 $FILE ..."
-          curl -L "$URL" -o "$MODEL_DIR/$FILE"
-          echo "下载完成：$MODEL_DIR/$FILE"
-          echo "可使用命令：llama -m $MODEL_DIR/$FILE ... 或 llama-server -m $MODEL_DIR/$FILE ..."
-          INNEREOF
-
-          chmod 755 "$DOWNLOAD_SCRIPT"
-          echo "模块安装完成！模型下载脚本已放置于：$DOWNLOAD_SCRIPT"
-          echo "请使用 'adb shell sh $DOWNLOAD_SCRIPT' 或直接在设备终端运行该脚本下载模型。"
-          echo "二进制位置：/system/bin/llama (CLI) 和 /system/bin/llama-server (服务器)"
-          EOF
-
-          chmod 755 "$MODULE_DIR/customize.sh"
-
-          # 打包模块
-          cd "$MODULE_DIR"
-          zip -r ../llama-android-module.zip ./*
-          cd ..
-
-      # 上传构建产物（两个二进制和模块）作为 Actions Artifact
-      - name: Upload artifacts
-        if: steps.check.outputs.new_release == 'true'
+      - name: 上传 artifact（直接下载单个文件）
         uses: actions/upload-artifact@v4
         with:
-          name: llama-android-build-${{ steps.check.outputs.release_tag }}
-          path: |
-            llama.cpp/llama-android-arm64-cli
-            llama.cpp/llama-android-arm64-server
-            llama-android-module.zip
-
-      # 使用 GitHub CLI 创建或更新 Release
-      - name: Create or Update Release
-        if: steps.check.outputs.new_release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ steps.check.outputs.release_tag }}-android"
-          TITLE="llama.cpp Android ${{ steps.check.outputs.release_tag }}"
-          NOTES="编译目标：Android arm64，最低 API 级别 31 (Android 12+)，**完全静态链接，无 OpenMP**（无外部 .so 依赖）\n包含文件：\n- \`llama-android-arm64-cli\`：命令行交互工具\n- \`llama-android-arm64-server\`：HTTP 服务器（兼容 OpenAI API）\n- \`llama-android-module-${{ steps.check.outputs.release_tag }}.zip\`：Magisk/KernelSU 模块，安装后二进制位于 \`/system/bin/llama\` 和 \`/system/bin/llama-server\`，并提供模型下载脚本。"
-
-          # 检查 Release 是否已存在
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release tag $TAG 已存在，更新现有 Release"
-            # 更新 Release 描述
-            gh release edit "$TAG" --notes "$NOTES" --title "$TITLE"
-            # 上传 / 覆盖资产
-            gh release upload "$TAG" \
-              llama.cpp/llama-android-arm64-cli \
-              llama.cpp/llama-android-arm64-server \
-              llama-android-module.zip \
-              --clobber
-          else
-            echo "创建新的 Release: $TAG"
-            gh release create "$TAG" \
-              --title "$TITLE" \
-              --notes "$NOTES" \
-              llama.cpp/llama-android-arm64-cli \
-              llama.cpp/llama-android-arm64-server \
-              llama-android-module.zip
-          fi
-
-      # 更新本地版本记录文件并推送回仓库（仅当有新版本且非手动触发时）
-      - name: Update current version file
-        if: steps.check.outputs.new_release == 'true' && github.event_name != 'workflow_dispatch'
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add current_llama_version.txt
-          git commit -m "chore: update current llama.cpp version to ${{ steps.check.outputs.release_tag }}"
-          git push
+          name: llama-server-android15-arm64-static
+          path: llama.cpp/build/bin/llama-server
+          if-no-files-found: error
+          retention-days: 30
