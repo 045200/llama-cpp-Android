@@ -22,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
-      latest_tag: ${{ steps.compare.outputs.latest_tag }}
     steps:
       - name: Get latest llama.cpp release tag
         id: get_latest
@@ -50,10 +49,8 @@ jobs:
           echo "Latest upstream: ${{ steps.get_latest.outputs.latest_tag }}"
           if [ "$FORCE_BUILD" = "true" ] || [ "$LAST_BUILD" != "${{ steps.get_latest.outputs.latest_tag }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "latest_tag=${{ steps.get_latest.outputs.latest_tag }}" >> $GITHUB_OUTPUT
           else
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "latest_tag=" >> $GITHUB_OUTPUT   # 确保输出始终有定义
           fi
 
   build:
@@ -62,17 +59,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Restore last build version cache (for update)
+      # 恢复缓存（用于后续更新版本号）
+      - name: Restore last build version cache
         uses: actions/cache@v4
         with:
           path: last_build_version.txt
           key: last-build-version-${{ runner.os }}
 
+      # 重新获取最新 tag（避免跨 job 传递问题）
+      - name: Get latest llama.cpp release tag
+        id: get_latest
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error::Failed to fetch latest tag from llama.cpp"
+            exit 1
+          fi
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
       - name: Checkout llama.cpp
         uses: actions/checkout@v4
         with:
           repository: ggerganov/llama.cpp
-          ref: ${{ needs.check-version.outputs.latest_tag }}
+          ref: ${{ steps.get_latest.outputs.latest_tag }}
 
       - name: Set up NDK (r27)
         id: setup-ndk
@@ -137,7 +146,6 @@ jobs:
             --jq 'map(select(.tagName | startswith("llama-server-android-"))) | sort_by(.createdAt) | reverse')
           count=$(echo "$releases" | jq length)
           if [ $count -gt 3 ]; then
-            # 保留前3个，删除后面的
             to_delete=$(echo "$releases" | jq -r '.[3:][] | .tag')
             for tag in $to_delete; do
               echo "Deleting old release: $tag"
@@ -153,7 +161,7 @@ jobs:
           body: |
             ###### 自动构建的 llama-server Android 版本
             - **构建日期**：${{ steps.date.outputs.tag }}
-            - **llama.cpp 版本**：${{ needs.check-version.outputs.latest_tag }}
+            - **llama.cpp 版本**：${{ steps.get_latest.outputs.latest_tag }}
             - ABI：arm64-v8a（支持 Android API 31+）
             - 包含库：$(cd package && ls *.so | tr '\n' ', ')
           files: ${{ env.PACKAGE_PATH }}
@@ -162,8 +170,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save new version to cache
-        run: echo "${{ needs.check-version.outputs.latest_tag }}" > last_build_version.txt
-      # 缓存会自动保存，因为之前有 restore 步骤
+        run: echo "${{ steps.get_latest.outputs.latest_tag }}" > last_build_version.txt
+      # 缓存会自动保存（因为之前有 restore 步骤）
 
       - name: Upload build artifacts (optional, retention 5 days)
         uses: actions/upload-artifact@v4
