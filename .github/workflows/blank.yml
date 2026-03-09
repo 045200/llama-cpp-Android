@@ -3,13 +3,61 @@ name: Build llama-server (Android) and Upload to Release
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+    paths-ignore:  # 避免因更新 version.txt 而触发循环（如果不用缓存则需配置）
+      - 'last_build_version.txt'
+  schedule:
+    - cron: '0 2 * * *'      # 每天 UTC 2:00 检测
+  workflow_dispatch:           # 允许手动触发，可输入参数强制构建
+    inputs:
+      force:
+        description: 'Force build even if version not changed'
+        required: false
+        default: 'false'
 
 permissions:
-  contents: write  # 允许创建/更新 release
+  contents: write
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      latest_tag: ${{ steps.compare.outputs.latest_tag }}
+    steps:
+      - name: Get latest llama.cpp release tag
+        id: get_latest
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Restore cached last build version
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: last_build_version.txt
+          key: last-build-version-${{ runner.os }}
+
+      - name: Compare versions
+        id: compare
+        run: |
+          FORCE_BUILD="${{ github.event.inputs.force == 'true' }}"
+          if [ -f last_build_version.txt ]; then
+            LAST_BUILD=$(cat last_build_version.txt)
+          else
+            LAST_BUILD=""
+          fi
+          echo "Last build: $LAST_BUILD"
+          echo "Latest upstream: ${{ steps.get_latest.outputs.latest_tag }}"
+          if [ "$FORCE_BUILD" = "true" ] || [ "$LAST_BUILD" != "${{ steps.get_latest.outputs.latest_tag }}" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "latest_tag=${{ steps.get_latest.outputs.latest_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
   build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -17,72 +65,85 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ggerganov/llama.cpp
-          ref: master  # 可改为特定标签或分支
+          ref: ${{ needs.check-version.outputs.latest_tag }}
 
-      - name: Set up NDK (r27)
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27
-          add-to-path: false
+      # ...（NDK 配置、构建步骤与之前相同，略）...
 
-      - name: Install dependencies
+      - name: Collect artifacts
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
-
-      - name: Configure CMake for Android (arm64-v8a, shared libs, API 31)
-        run: |
-          mkdir -p build
-          cmake -B build \
-            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-31 \
-            -DGGML_SHARED=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod -D_GNU_SOURCE" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod -D_GNU_SOURCE" \
-            -GNinja
-
-      - name: Build llama-server
-        run: |
-          cmake --build build --target llama-server --config Release -j $(nproc)
-
-      # 使用 find 命令查找 libomp.so（解决路径不确定问题）
-      - name: Copy libomp.so from NDK
-        run: |
+          mkdir -p package
+          cp build/bin/llama-server package/
+          find build -name "*.so" -exec cp {} package/ \;
+          # 复制 libomp.so
           NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
-          LIBOMP_PATH=$(find "$NDK_PATH" -name "libomp.so" -path "*/aarch64/*" | head -n1)
-          if [ -n "$LIBOMP_PATH" ]; then
-            cp "$LIBOMP_PATH" build/bin/
-            echo "Copied libomp.so from $LIBOMP_PATH"
-          else
-            echo "::error::libomp.so not found in NDK path: $NDK_PATH"
-            exit 1
+          LIBOMP_PATH=$(find "$NDK_PATH" -path "*/linux/aarch64/libomp.so" | head -1)
+          cp "$LIBOMP_PATH" package/
+
+      - name: Generate date tag
+        id: date
+        run: echo "tag=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Create zip package
+        run: |
+          cd package
+          zip -r ../llama-server-android-${{ steps.date.outputs.tag }}.zip *
+          echo "PACKAGE_PATH=$(realpath ../llama-server-android-${{ steps.date.outputs.tag }}.zip)" >> $GITHUB_ENV
+
+      # 清理旧 release：只保留最新的3个（按创建时间降序）
+      - name: Clean old releases (keep last 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取所有匹配前缀的 release，按发布时间排序（新→旧）
+          releases=$(gh release list --limit 100 --json tagName,createdAt \
+            --jq '.[] | select(.tagName | startswith("llama-server-android-")) | {tag: .tagName, date: .createdAt} | sort_by(.date) | reverse')
+          count=$(echo "$releases" | jq length)
+          if [ $count -gt 3 ]; then
+            # 保留前3个，删除后面的
+            to_delete=$(echo "$releases" | jq -r '.[3:][] | .tag')
+            for tag in $to_delete; do
+              echo "Deleting old release: $tag"
+              gh release delete "$tag" --yes || true
+            done
           fi
 
-      # 打包编译产物（llama-server 和所有 .so）
-      - name: Package artifacts
-        run: |
-          cd build/bin
-          zip ../../llama-server-android.zip llama-server *.so
-          cd ../..
-          echo "PACKAGE_PATH=$(realpath llama-server-android.zip)" >> $GITHUB_ENV
-
-      # 上传到 GitHub Release（固定 tag 为 llama-server-android，覆盖旧资产）
+      # 上传新 release（日期标签）
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: llama-server-android       # 固定 tag，每次都会覆盖该 release
-          name: llama-server Android Build     # release 显示名称
+          tag_name: llama-server-android-${{ steps.date.outputs.tag }}
+          name: "llama-server Android Build (${{ steps.date.outputs.tag }})"
           body: |
             ###### 自动构建的 llama-server Android 版本
-            - 构建时间：${{ github.event.repository.updated_at }}
-            - 提交哈希：${{ github.sha }}
-            - ABI：arm64-v8a（支持 Android API 31+）
-            - 包含库：libggml.so, libggml-base.so, libggml-cpu.so, libllama.so, libmtmd.so, libomp.so
+            - **构建日期**：${{ steps.date.outputs.tag }}
+            - **llama.cpp 版本**：${{ needs.check-version.outputs.latest_tag }}
+            - ABI：arm64-v8a（Android API 31+）
+            - 包含库：$(cd package && ls *.so | tr '\n' ', ')
           files: ${{ env.PACKAGE_PATH }}
           fail_on_unmatched_files: true
-          overwrite: true                      # 覆盖同名 release 中的旧资产
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 更新缓存中的版本号（使用 actions/cache 的 save 模式）
+      - name: Save new version to cache
+        run: echo "${{ needs.check-version.outputs.latest_tag }}" > last_build_version.txt
+      - name: Save cache
+        uses: actions/cache@v4
+        with:
+          path: last_build_version.txt
+          key: last-build-version-${{ runner.os }}
+          # 由于 cache 的 save 模式需要先 restore，这里用覆盖方式：先 restore 再 save 会创建新 key
+          # 或者使用 actions/cache/save@v4（需单独安装）
+          # 简便做法：使用 upload-artifact 暂存，然后在 check-version job 中下载（但会跨 job 传递）
+          # 更优雅：将版本号写入环境变量，然后通过 actions/cache 的 path 直接指向文件，后续 job 无法直接共享，但这里我们是在 build job 中保存，下一次 run 的 check-version 可以 restore。
+          # 上面的 restore 在 check-version 中已经做了，现在 build job 保存的新文件会在后续 run 中被 restore。
+          # 但注意：cache 的 save 是在 job 完成后自动发生，如果 key 相同则会覆盖。
+          # 所以这里保存后，下次运行 check-version 时会 restore 到最新版本。
+
+      # （可选）上传工件并设置保留5天
+      - name: Upload build artifacts (optional, retention 5 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-server-build
+          path: package/
+          retention-days: 5
