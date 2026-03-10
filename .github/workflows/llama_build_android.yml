@@ -26,15 +26,45 @@ jobs:
       - name: Install dependencies (jq)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Get latest llama.cpp release tag
+      - name: Get latest llama.cpp release tag (with retry and auth)
         id: get_latest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
-          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-            echo "::error::Failed to fetch latest tag from llama.cpp"
+          # 定义重试函数
+          fetch_tag() {
+            local max_retries=3
+            local retry_count=0
+            local wait_time=5
+            
+            while [ $retry_count -lt $max_retries ]; do
+              echo "Attempt $((retry_count + 1)) to fetch latest tag..."
+              
+              # 使用 GitHub CLI 获取最新 release（自动处理认证）
+              RESPONSE=$(gh release list --repo ggerganov/llama.cpp --limit 1 --json tagName --jq '.[0].tagName' 2>&1)
+              EXIT_CODE=$?
+              
+              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESPONSE" ] && [ "$RESPONSE" != "null" ]; then
+                echo "latest_tag=$RESPONSE" >> $GITHUB_OUTPUT
+                echo "Successfully fetched latest tag: $RESPONSE"
+                return 0
+              fi
+              
+              echo "Attempt $((retry_count + 1)) failed. Response: $RESPONSE"
+              retry_count=$((retry_count + 1))
+              
+              if [ $retry_count -lt $max_retries ]; then
+                echo "Retrying in ${wait_time} seconds..."
+                sleep $wait_time
+                wait_time=$((wait_time * 2))  # 指数退避
+              fi
+            done
+            
+            echo "::error::Failed to fetch latest tag after $max_retries attempts"
             exit 1
-          fi
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          }
+          
+          fetch_tag
 
       - name: Restore cached last build version
         id: cache
@@ -66,7 +96,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 先安装依赖，确保 curl 和 jq 可用
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -78,15 +107,44 @@ jobs:
           path: last_build_version.txt
           key: last-build-version-${{ runner.os }}
 
-      - name: Get latest llama.cpp release tag
+      - name: Get latest llama.cpp release tag (with retry and auth)
         id: get_latest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
-          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-            echo "::error::Failed to fetch latest tag from llama.cpp"
+          # 复用相同的重试逻辑
+          fetch_tag() {
+            local max_retries=3
+            local retry_count=0
+            local wait_time=5
+            
+            while [ $retry_count -lt $max_retries ]; do
+              echo "Attempt $((retry_count + 1)) to fetch latest tag..."
+              
+              RESPONSE=$(gh release list --repo ggerganov/llama.cpp --limit 1 --json tagName --jq '.[0].tagName' 2>&1)
+              EXIT_CODE=$?
+              
+              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESPONSE" ] && [ "$RESPONSE" != "null" ]; then
+                echo "latest_tag=$RESPONSE" >> $GITHUB_OUTPUT
+                echo "Successfully fetched latest tag: $RESPONSE"
+                return 0
+              fi
+              
+              echo "Attempt $((retry_count + 1)) failed. Response: $RESPONSE"
+              retry_count=$((retry_count + 1))
+              
+              if [ $retry_count -lt $max_retries ]; then
+                echo "Retrying in ${wait_time} seconds..."
+                sleep $wait_time
+                wait_time=$((wait_time * 2))
+              fi
+            done
+            
+            echo "::error::Failed to fetch latest tag after $max_retries attempts"
             exit 1
-          fi
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          }
+          
+          fetch_tag
 
       - name: Checkout llama.cpp
         uses: actions/checkout@v4
@@ -147,7 +205,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取所有匹配前缀的 release，按创建时间排序（新→旧）
           releases=$(gh release list --limit 100 --json tagName,createdAt \
             --jq 'map(select(.tagName | startswith("llama-server-android-"))) | sort_by(.createdAt) | reverse')
           count=$(echo "$releases" | jq length)
