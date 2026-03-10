@@ -23,10 +23,17 @@ jobs:
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
     steps:
+      - name: Install dependencies (jq)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Get latest llama.cpp release tag
         id: get_latest
         run: |
           LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            echo "::error::Failed to fetch latest tag from llama.cpp"
+            exit 1
+          fi
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
 
       - name: Restore cached last build version
@@ -59,19 +66,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 恢复缓存（用于后续更新版本号）
+      # 先安装依赖，确保 curl 和 jq 可用
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build jq
+
       - name: Restore last build version cache
         uses: actions/cache@v4
         with:
           path: last_build_version.txt
           key: last-build-version-${{ runner.os }}
 
-      # 重新获取最新 tag（避免跨 job 传递问题）
       - name: Get latest llama.cpp release tag
         id: get_latest
         run: |
           LATEST_TAG=$(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest | jq -r .tag_name)
-          if [ -z "$LATEST_TAG" ]; then
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
             echo "::error::Failed to fetch latest tag from llama.cpp"
             exit 1
           fi
@@ -89,11 +100,6 @@ jobs:
         with:
           ndk-version: r27
           add-to-path: false
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build jq
 
       - name: Configure CMake for Android
         run: |
@@ -146,7 +152,7 @@ jobs:
             --jq 'map(select(.tagName | startswith("llama-server-android-"))) | sort_by(.createdAt) | reverse')
           count=$(echo "$releases" | jq length)
           if [ $count -gt 3 ]; then
-            to_delete=$(echo "$releases" | jq -r '.[3:][] | .tag')
+            to_delete=$(echo "$releases" | jq -r '.[3:][] | .tagName')
             for tag in $to_delete; do
               echo "Deleting old release: $tag"
               gh release delete "$tag" --yes || true
@@ -171,11 +177,3 @@ jobs:
 
       - name: Save new version to cache
         run: echo "${{ steps.get_latest.outputs.latest_tag }}" > last_build_version.txt
-      # 缓存会自动保存（因为之前有 restore 步骤）
-
-      - name: Upload build artifacts (optional, retention 5 days)
-        uses: actions/upload-artifact@v4
-        with:
-          name: llama-server-build
-          path: package/
-          retention-days: 5
