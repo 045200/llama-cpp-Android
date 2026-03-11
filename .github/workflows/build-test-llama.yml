@@ -59,7 +59,7 @@ jobs:
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
             -G Ninja
-          # 关键修复：加上双引号 + 正确 ${{ }}，防止任何转义
+          # 关键修复：加上双引号 + 正确写法，防止任何转义
           cmake --build . --config "${{ inputs.build_type }}" -j $(nproc)
 
       - name: 打包原生便携 ZIP（单文件静态 + Magisk 说明）
