@@ -1,0 +1,193 @@
+name: Build llama-server (Android) and Upload to Release
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'last_build_version.txt'
+  schedule:
+    - cron: '0 2 * * *'      # 每天 UTC 2:00 检测
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force build even if version not changed'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      latest_tag: ${{ steps.get_latest.outputs.latest_tag }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+    steps:
+      - name: Install dependencies (jq)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get latest llama.cpp release tag (with retry and auth)
+        id: get_latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fetch_tag() {
+            local max_retries=3
+            local retry_count=0
+            local wait_time=5
+            
+            while [ $retry_count -lt $max_retries ]; do
+              echo "Attempt $((retry_count + 1)) to fetch latest tag..."
+              
+              RESPONSE=$(gh release list --repo ggerganov/llama.cpp --limit 1 --json tagName --jq '.[0].tagName' 2>&1)
+              EXIT_CODE=$?
+              
+              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESPONSE" ] && [ "$RESPONSE" != "null" ]; then
+                echo "latest_tag=$RESPONSE" >> $GITHUB_OUTPUT
+                echo "Successfully fetched latest tag: $RESPONSE"
+                return 0
+              fi
+              
+              echo "Attempt $((retry_count + 1)) failed. Response: $RESPONSE"
+              retry_count=$((retry_count + 1))
+              
+              if [ $retry_count -lt $max_retries ]; then
+                echo "Retrying in ${wait_time} seconds..."
+                sleep $wait_time
+                wait_time=$((wait_time * 2))
+              fi
+            done
+            
+            echo "::error::Failed to fetch latest tag after $max_retries attempts"
+            exit 1
+          }
+          
+          fetch_tag
+
+      - name: Restore cached last build version
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: last_build_version.txt
+          key: last-build-version-${{ runner.os }}
+
+      - name: Compare versions
+        id: compare
+        run: |
+          FORCE_BUILD="${{ github.event.inputs.force == 'true' }}"
+          if [ -f last_build_version.txt ]; then
+            LAST_BUILD=$(cat last_build_version.txt)
+          else
+            LAST_BUILD=""
+          fi
+          echo "Last build: $LAST_BUILD"
+          echo "Latest upstream: ${{ steps.get_latest.outputs.latest_tag }}"
+          if [ "$FORCE_BUILD" = "true" ] || [ "$LAST_BUILD" != "${{ steps.get_latest.outputs.latest_tag }}" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build jq
+
+      - name: Set up NDK (r27)
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: false
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggerganov/llama.cpp
+          ref: ${{ needs.check-version.outputs.latest_tag }}
+
+      - name: Configure CMake for Android (optimized for standalone executable)
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-31 \
+            -DANDROID_STL=c++_static \
+            -DGGML_SHARED=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,\$ORIGIN" \
+            -GNinja
+
+      - name: Build llama-server
+        run: cmake --build build --target llama-server --config Release -j $(nproc)
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p package
+          cp build/bin/llama-server package/
+
+      - name: Copy libomp.so from NDK
+        run: |
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          LIBOMP_PATH=$(find "$NDK_PATH" -path "*/linux/aarch64/libomp.so" | head -1)
+          if [ -n "$LIBOMP_PATH" ]; then
+            cp "$LIBOMP_PATH" package/
+          else
+            echo "::error::libomp.so not found"
+            exit 1
+          fi
+
+      - name: Generate date tag
+        id: date
+        run: echo "tag=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Create zip package
+        run: |
+          cd package
+          zip -r ../llama-server-android-${{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip *
+          echo "PACKAGE_PATH=$(realpath ../llama-server-android-${{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip)" >> $GITHUB_ENV
+
+      - name: Clean old releases (keep last 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          releases=$(gh release list --limit 100 --json tagName,createdAt \
+            --jq 'map(select(.tagName | startswith("llama-server-android-"))) | sort_by(.createdAt) | reverse')
+          count=$(echo "$releases" | jq length)
+          if [ $count -gt 3 ]; then
+            to_delete=$(echo "$releases" | jq -r '.[3:][] | .tagName')
+            for tag in $to_delete; do
+              echo "Deleting old release: $tag"
+              gh release delete "$tag" --yes || true
+            done
+          fi
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-server-android-${{ steps.date.outputs.tag }}
+          name: "llama-server Android Build (${{ steps.date.outputs.tag }})"
+          body: |
+            ###### 自动构建的 llama-server Android 版本
+            - **构建日期**：${{ steps.date.outputs.tag }}
+            - **llama.cpp 版本**：${{ needs.check-version.outputs.latest_tag }}
+            - **ABI**：arm64-v8a（Android API 31+）
+            - **依赖库**：`libomp.so`（已包含在同一目录，设置 RPATH=$ORIGIN，可直接运行）
+            - **编译优化**：启用 ARMv8.4-A Dot Product 指令集，提升 CPU 推理性能
+            - **使用方式**：将 zip 包内所有文件解压到手机同一目录，执行 `./llama-server`
+          files: ${{ env.PACKAGE_PATH }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save new version to cache
+        run: echo "${{ needs.check-version.outputs.latest_tag }}" > last_build_version.txt
