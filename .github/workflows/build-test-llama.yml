@@ -1,225 +1,113 @@
-name: Build llama-server Release
+name: Build Android Native arm64 llama-server (Magisk/KernelSU)
 
 on:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - 'last_build_version.txt'
-  schedule:
-    - cron: '0 2 * * *'      # 每天 UTC 2:00 检测
   workflow_dispatch:
     inputs:
-      force:
-        description: 'Force build even if version not changed'
-        required: false
-        default: 'false'
+      repo:
+        description: 'llama.cpp 仓库 (owner/repo)'
+        required: true
+        default: 'ggml-org/llama.cpp'
+      ref:
+        description: '分支或 Tag (master / bxxxx)'
+        required: true
+        default: 'master'
+      build_type:
+        description: 'Release 或 Debug'
+        required: true
+        default: 'Release'
 
-# GitHub Actions 最佳实践：限制权限 + 并发控制
-permissions:
-  contents: write
-
-concurrency:
-  group: \( {{ github.workflow }}- \){{ github.ref }}
-  cancel-in-progress: true
+env:
+  BUILD_DIR: build-android
+  PORTABLE_DIR: llama-server-android-arm64-native
+  NDK_VERSION: r27d
 
 jobs:
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      latest_tag: ${{ steps.get_latest.outputs.latest_tag }}
-      should_build: ${{ steps.compare.outputs.should_build }}
-    steps:
-      - name: Install dependencies (jq)
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Get latest llama.cpp release tag (with retry and auth)
-        id: get_latest
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          fetch_tag() {
-            local max_retries=3
-            local retry_count=0
-            local wait_time=5
-            
-            while [ $retry_count -lt $max_retries ]; do
-              echo "Attempt $((retry_count + 1)) to fetch latest tag..."
-              
-              RESPONSE=$(gh release list --repo ggerganov/llama.cpp --limit 1 --json tagName --jq '.[0].tagName' 2>&1)
-              EXIT_CODE=$?
-              
-              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESPONSE" ] && [ "$RESPONSE" != "null" ]; then
-                echo "latest_tag=$RESPONSE" >> $GITHUB_OUTPUT
-                echo "Successfully fetched latest tag: $RESPONSE"
-                return 0
-              fi
-              
-              echo "Attempt $((retry_count + 1)) failed. Response: $RESPONSE"
-              retry_count=$((retry_count + 1))
-              
-              if [ $retry_count -lt $max_retries ]; then
-                echo "Retrying in ${wait_time} seconds..."
-                sleep $wait_time
-                wait_time=$((wait_time * 2))
-              fi
-            done
-            
-            echo "::error::Failed to fetch latest tag after $max_retries attempts"
-            exit 1
-          }
-          
-          fetch_tag
-
-      - name: Restore cached last build version
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: last_build_version.txt
-          key: last-build-version-${{ runner.os }}
-
-      - name: Compare versions
-        id: compare
-        run: |
-          FORCE_BUILD="${{ github.event.inputs.force == 'true' }}"
-          if [ -f last_build_version.txt ]; then
-            LAST_BUILD=$(cat last_build_version.txt)
-          else
-            LAST_BUILD=""
-          fi
-          echo "Last build: $LAST_BUILD"
-          echo "Latest upstream: ${{ steps.get_latest.outputs.latest_tag }}"
-          if [ "$FORCE_BUILD" = "true" ] || [ "\( LAST_BUILD" != " \){{ steps.get_latest.outputs.latest_tag }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
-
   build:
-    needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-22.04
     steps:
-      - name: Install dependencies
+      - name: 安装构建工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build jq ccache
+          sudo apt-get install -y cmake ninja-build
 
-      - name: Set up NDK (r29 - latest stable)
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r29
-          add-to-path: false
-
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ggerganov/llama.cpp
-          ref: ${{ needs.check-version.outputs.latest_tag }}
-
-      # ccache 缓存加速（llama.cpp 官方 CI 标准做法）
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: \~/.ccache
-          key: ccache-\( {{ runner.os }}-llama- \){{ needs.check-version.outputs.latest_tag }}
-          restore-keys: |
-            ccache-${{ runner.os }}-llama-
-
-      - name: Configure ccache
+      - name: 下载 Android NDK r27d LTS
         run: |
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O ndk.zip
+          unzip -q ndk.zip
+          mv android-ndk-${{ env.NDK_VERSION }} $HOME/android-ndk
+          echo "ANDROID_NDK=$HOME/android-ndk" >> $GITHUB_ENV
 
-      # 修复核心问题：CMake try_compile 阶段找不到 main（NDK + EXE_LINKER_FLAGS 常见冲突）
-      # 同时启用 OpenMP（默认 ON，但显式声明更清晰）+ 保留 RPATH 让 libomp.so 同目录运行
-      - name: Configure CMake for Android (optimized for standalone executable)
+      - name: 克隆 llama.cpp
         run: |
-          cmake -B build \
-            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+          git clone https://github.com/${{ inputs.repo }}.git --branch ${{ inputs.ref }} --depth 1 llama.cpp
+
+      - name: 配置 & 编译（原生 arm64 完全静态）
+        working-directory: llama.cpp
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}
+          cd ${{ env.BUILD_DIR }}
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-31 \
+            -DANDROID_PLATFORM=android-28 \
+            -DCMAKE_C_FLAGS="-march=armv8.7a" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.7a" \
+            -DGGML_OPENMP=OFF \
+            -DGGML_LLAMAFILE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
-            -DGGML_SHARED=OFF \
-            -DGGML_OPENMP=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
-            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,\$ORIGIN" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_C_COMPILER_WORKS=ON \
-            -DCMAKE_CXX_COMPILER_WORKS=ON \
-            -GNinja
+            -DGGML_BLAS=OFF \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -G Ninja
+          cmake --build . --config \( {{ inputs.build_type }} -j \)(nproc)
 
-      - name: Build llama-server
-        run: cmake --build build --target llama-server --config Release -j $(nproc)
-
-      # 优化：strip 二进制，显著减小体积
-      - name: Strip binary
+      - name: 打包原生便携 ZIP（单文件静态 + Magisk 说明）
+        working-directory: llama.cpp
         run: |
-          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" build/bin/llama-server
+          mkdir -p ${{ env.PORTABLE_DIR }}
+          
+          # 复制静态二进制（根目录，方便 adb push）
+          cp ${{ env.BUILD_DIR }}/bin/llama-server ${{ env.PORTABLE_DIR }}/llama-server
+          
+          # Magisk/KernelSU 专用说明文件
+          cat > ${{ env.PORTABLE_DIR }}/README.txt << 'EOF'
+【Android 原生 arm64 llama-server（Magisk/KernelSU 专用）】
+完全静态编译 · 零依赖 · 直接运行
 
-      - name: Collect artifacts
+=== 手动运行（推荐测试）===
+1. adb push llama-server /data/local/tmp/
+2. adb shell
+3. chmod 755 /data/local/tmp/llama-server
+4. /data/local/tmp/llama-server -m /sdcard/model.gguf --host 0.0.0.0 --port 8080 -c 4096 -ngl 0
+
+=== Magisk/KernelSU 模块挂载（开机自动可用）===
+1. 在 Magisk/KernelSU App 中新建模块
+2. 把 llama-server 放到模块目录的 system/bin/llama-server
+3. module.prop 示例：
+   id=llama-server
+   name=llama-server
+   version=1.0
+   versionCode=1
+   author=you
+   description=llama-server arm64
+4. service.sh 示例（可选自动启动）：
+   #!/system/bin/sh
+   /system/bin/llama-server -m /data/adb/llama/model.gguf --port 8080 --host 0.0.0.0 -ngl 0 > /data/adb/llama.log 2>&1 &
+5. 安装模块 → 重启 → 直接在 ADB 或终端执行 llama-server
+
+WebUI: 浏览器打开 http://手机IP:8080
+模型建议放 /sdcard/Download/ 或 /data/adb/llama/
+EOF
+
+      - name: 压缩成 ZIP
+        working-directory: llama.cpp
         run: |
-          mkdir -p package
-          cp build/bin/llama-server package/
+          cd ${{ env.PORTABLE_DIR }}
+          zip -r ../../llama-server-android-arm64-native.zip .
 
-      - name: Copy libomp.so from NDK
-        run: |
-          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
-          LIBOMP_PATH=$(find "$NDK_PATH" -path "*/linux/aarch64/libomp.so" | head -1)
-          if [ -n "$LIBOMP_PATH" ]; then
-            cp "$LIBOMP_PATH" package/
-          else
-            echo "::error::libomp.so not found"
-            exit 1
-          fi
-
-      - name: Generate date tag
-        id: date
-        run: echo "tag=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
-
-      - name: Create zip package
-        run: |
-          cd package
-          zip -r ../llama-server-android-\( {{ needs.check-version.outputs.latest_tag }}- \){{ steps.date.outputs.tag }}.zip *
-          echo "PACKAGE_PATH=\( (realpath ../llama-server-android- \){{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip)" >> $GITHUB_ENV
-
-      - name: Clean old releases (keep last 3)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          releases=$(gh release list --limit 100 --json tagName,createdAt \
-            --jq 'map(select(.tagName | startswith("llama-server-android-"))) | sort_by(.createdAt) | reverse')
-          count=$(echo "$releases" | jq length)
-          if [ $count -gt 3 ]; then
-            to_delete=$(echo "$releases" | jq -r '.[3:][] | .tagName')
-            for tag in $to_delete; do
-              echo "Deleting old release: $tag"
-              gh release delete "$tag" --yes || true
-            done
-          fi
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: llama-server-android-${{ steps.date.outputs.tag }}
-          name: "llama-server Android Build (${{ steps.date.outputs.tag }})"
-          body: |
-            ###### 自动构建的 llama-server Android 版本
-            - **构建日期**：${{ steps.date.outputs.tag }}
-            - **llama.cpp 版本**：${{ needs.check-version.outputs.latest_tag }}
-            - **ABI**：arm64-v8a（Android API 31+）
-            - **依赖库**：`libomp.so`（已包含在同一目录，设置 RPATH=$ORIGIN，可直接运行）
-            - **编译优化**：启用 ARMv8.4-A Dot Product + OpenMP + ccache 加速
-            - **使用方式**：将 zip 包内所有文件解压到手机同一目录，执行 `./llama-server`
-          files: ${{ env.PACKAGE_PATH }}
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Save new version to cache
-        run: echo "${{ needs.check-version.outputs.latest_tag }}" > last_build_version.txt
+          name: llama-server-android-arm64-native
+          path: llama-server-android-arm64-native.zip
+          retention-days: 30
