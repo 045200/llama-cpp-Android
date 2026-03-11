@@ -14,8 +14,13 @@ on:
         required: false
         default: 'false'
 
+# GitHub Actions 最佳实践：限制权限 + 并发控制
 permissions:
   contents: write
+
+concurrency:
+  group: \( {{ github.workflow }}- \){{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check-version:
@@ -83,7 +88,7 @@ jobs:
           fi
           echo "Last build: $LAST_BUILD"
           echo "Latest upstream: ${{ steps.get_latest.outputs.latest_tag }}"
-          if [ "$FORCE_BUILD" = "true" ] || [ "$LAST_BUILD" != "${{ steps.get_latest.outputs.latest_tag }}" ]; then
+          if [ "$FORCE_BUILD" = "true" ] || [ "\( LAST_BUILD" != " \){{ steps.get_latest.outputs.latest_tag }}" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
           else
             echo "should_build=false" >> $GITHUB_OUTPUT
@@ -98,13 +103,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build jq
+          sudo apt-get install -y cmake ninja-build jq ccache
 
-      - name: Set up NDK (r27)
+      - name: Set up NDK (r29 - latest stable)
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27
+          ndk-version: r29
           add-to-path: false
 
       - name: Checkout llama.cpp
@@ -113,6 +118,23 @@ jobs:
           repository: ggerganov/llama.cpp
           ref: ${{ needs.check-version.outputs.latest_tag }}
 
+      # ccache 缓存加速（llama.cpp 官方 CI 标准做法）
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: \~/.ccache
+          key: ccache-\( {{ runner.os }}-llama- \){{ needs.check-version.outputs.latest_tag }}
+          restore-keys: |
+            ccache-${{ runner.os }}-llama-
+
+      - name: Configure ccache
+        run: |
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      # 修复核心问题：CMake try_compile 阶段找不到 main（NDK + EXE_LINKER_FLAGS 常见冲突）
+      # 同时启用 OpenMP（默认 ON，但显式声明更清晰）+ 保留 RPATH 让 libomp.so 同目录运行
       - name: Configure CMake for Android (optimized for standalone executable)
         run: |
           cmake -B build \
@@ -121,14 +143,24 @@ jobs:
             -DANDROID_PLATFORM=android-31 \
             -DANDROID_STL=c++_static \
             -DGGML_SHARED=OFF \
+            -DGGML_OPENMP=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=armv8.4a+dotprod -D_GNU_SOURCE" \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,\$ORIGIN" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_COMPILER_WORKS=ON \
+            -DCMAKE_CXX_COMPILER_WORKS=ON \
             -GNinja
 
       - name: Build llama-server
         run: cmake --build build --target llama-server --config Release -j $(nproc)
+
+      # 优化：strip 二进制，显著减小体积
+      - name: Strip binary
+        run: |
+          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" build/bin/llama-server
 
       - name: Collect artifacts
         run: |
@@ -153,8 +185,8 @@ jobs:
       - name: Create zip package
         run: |
           cd package
-          zip -r ../llama-server-android-${{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip *
-          echo "PACKAGE_PATH=$(realpath ../llama-server-android-${{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip)" >> $GITHUB_ENV
+          zip -r ../llama-server-android-\( {{ needs.check-version.outputs.latest_tag }}- \){{ steps.date.outputs.tag }}.zip *
+          echo "PACKAGE_PATH=\( (realpath ../llama-server-android- \){{ needs.check-version.outputs.latest_tag }}-${{ steps.date.outputs.tag }}.zip)" >> $GITHUB_ENV
 
       - name: Clean old releases (keep last 3)
         env:
@@ -182,7 +214,7 @@ jobs:
             - **llama.cpp 版本**：${{ needs.check-version.outputs.latest_tag }}
             - **ABI**：arm64-v8a（Android API 31+）
             - **依赖库**：`libomp.so`（已包含在同一目录，设置 RPATH=$ORIGIN，可直接运行）
-            - **编译优化**：启用 ARMv8.4-A Dot Product 指令集，提升 CPU 推理性能
+            - **编译优化**：启用 ARMv8.4-A Dot Product + OpenMP + ccache 加速
             - **使用方式**：将 zip 包内所有文件解压到手机同一目录，执行 `./llama-server`
           files: ${{ env.PACKAGE_PATH }}
           fail_on_unmatched_files: true
