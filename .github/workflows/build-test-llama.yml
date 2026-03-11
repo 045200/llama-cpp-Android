@@ -59,17 +59,18 @@ jobs:
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
             -G Ninja
-          cmake --build . --config \( {{ inputs.build_type }} -j \)(nproc)
+          # 关键修复：加上双引号 + 正确 ${{ }}，防止任何转义
+          cmake --build . --config "${{ inputs.build_type }}" -j $(nproc)
 
       - name: 打包原生便携 ZIP（单文件静态 + Magisk 说明）
         working-directory: llama.cpp
         run: |
           mkdir -p ${{ env.PORTABLE_DIR }}
           
-          # 复制静态二进制（根目录，方便 adb push）
+          # 复制静态二进制（根目录，方便 adb push / Magisk system/bin）
           cp ${{ env.BUILD_DIR }}/bin/llama-server ${{ env.PORTABLE_DIR }}/llama-server
           
-          # Magisk/KernelSU 专用说明文件（已修复缩进）
+          # Magisk/KernelSU 专用说明文件
           cat > ${{ env.PORTABLE_DIR }}/README.txt <<-'EOF'
             【Android 原生 arm64 llama-server（Magisk/KernelSU 专用）】
             完全静态编译 · 零依赖 · 直接运行
@@ -81,21 +82,20 @@ jobs:
             4. /data/local/tmp/llama-server -m /sdcard/model.gguf --host 0.0.0.0 --port 8080 -c 4096 -ngl 0
 
             === Magisk/KernelSU 模块挂载（开机自动可用）===
-            1. 在 Magisk/KernelSU App 中新建模块
-            2. 把 llama-server 放到模块目录的 system/bin/llama-server
-            3. module.prop 示例：
+            1. 新建模块，把 llama-server 放到 system/bin/llama-server
+            2. module.prop 示例：
                id=llama-server
                name=llama-server
                version=1.0
                versionCode=1
                author=you
                description=llama-server arm64
-            4. service.sh 示例（可选自动启动）：
+            3. service.sh（可选自动启动）：
                #!/system/bin/sh
                /system/bin/llama-server -m /data/adb/llama/model.gguf --port 8080 --host 0.0.0.0 -ngl 0 > /data/adb/llama.log 2>&1 &
-            5. 安装模块 → 重启 → 直接在 ADB 或终端执行 llama-server
+            4. 安装模块 → 重启
 
-            WebUI: 浏览器打开 http://手机IP:8080
+            WebUI: http://手机IP:8080
             模型建议放 /sdcard/Download/ 或 /data/adb/llama/
           EOF
 
