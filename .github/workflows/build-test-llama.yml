@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server with Release & Artifact cleanup
+name: Build Android Native arm64 llama-server (Pure CPU) with Release & Cleanup
 
 on:
   workflow_dispatch:
@@ -25,8 +25,8 @@ env:
   BUILD_DIR: build-android
   NDK_VERSION: r27d
   RELEASE_TAG_PREFIX: "llama-server-android-"
-  RELEASE_NAME_PREFIX: "llama-server Android arm64 "
-  ARTIFACT_NAME: "llama-server-android-arm64-native"
+  RELEASE_NAME_PREFIX: "llama-server Android arm64 (Pure CPU, Android 15 ready) "
+  ARTIFACT_NAME: "llama-server-android-arm64-native-cpu"
 
 permissions:
   contents: write
@@ -53,11 +53,10 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
 
-      # ---------- 修正：使用正确的环境变量和命令替换 ----------
       - name: 获取上游仓库最新 commit SHA
         id: get_commit
         run: |
-          SHA=$(git ls-remote "https://github.com/$REPO.git" "$REF" | cut -f1)
+          SHA=\( (git ls-remote https://github.com/ \){{ env.REPO }}.git ${{ env.REF }} | cut -f1)
           echo "LATEST_SHA=$SHA" >> $GITHUB_ENV
           echo "latest_sha=$SHA" >> $GITHUB_OUTPUT
 
@@ -66,7 +65,7 @@ jobs:
         uses: actions/cache/restore@v3
         with:
           path: last_commit.txt
-          key: last-commit-${{ env.REPO }}-${{ env.REF }}
+          key: last-commit-\( {{ env.REPO }}- \){{ env.REF }}
 
       - name: 判断是否需要构建
         id: check
@@ -74,7 +73,7 @@ jobs:
           if [ "${{ github.event_name }}" == "schedule" ]; then
             if [ -f last_commit.txt ]; then
               LAST_SHA=$(cat last_commit.txt)
-              if [ "$LAST_SHA" == "${{ steps.get_commit.outputs.latest_sha }}" ]; then
+              if [ "\( LAST_SHA" == " \){{ steps.get_commit.outputs.latest_sha }}" ]; then
                 echo "✅ 无新提交，跳过构建"
                 echo "skip=true" >> $GITHUB_OUTPUT
               else
@@ -105,7 +104,7 @@ jobs:
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: 配置 & 编译
+      - name: 配置 & 编译 (Pure CPU, Snapdragon optimized, Android 15 ready)
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -114,9 +113,9 @@ jobs:
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-28 \
-            -DCMAKE_C_FLAGS="-march=armv8.7a" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.7a" \
+            -DANDROID_PLATFORM=android-34 \  # 升级到 android-34，完美适配 Android 15 设备
+            -DCMAKE_C_FLAGS="-march=armv8.4a+dotprod" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.4a+dotprod" \
             -DGGML_OPENMP=OFF \
             -DGGML_LLAMAFILE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
@@ -145,8 +144,8 @@ jobs:
         id: release_meta
         run: |
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          TAG="${{ env.RELEASE_TAG_PREFIX }}${TIMESTAMP}-${{ env.SHORT_SHA }}"
-          NAME="${{ env.RELEASE_NAME_PREFIX }}${TIMESTAMP} (${{ env.SHORT_SHA }})"
+          TAG="\( {{ env.RELEASE_TAG_PREFIX }} \){TIMESTAMP}-${{ env.SHORT_SHA }}"
+          NAME="\( {{ env.RELEASE_NAME_PREFIX }} \){TIMESTAMP} (${{ env.SHORT_SHA }})"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "name=$NAME" >> $GITHUB_OUTPUT
 
@@ -156,7 +155,7 @@ jobs:
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
-          body: 自动构建于 ${{ steps.release_meta.outputs.name }}
+          body: 自动构建于 ${{ steps.release_meta.outputs.name }} (Pure CPU, armv8.4a+dotprod, Android-34 for Android 15 compatibility)
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -192,4 +191,4 @@ jobs:
         uses: actions/cache/save@v3
         with:
           path: last_commit.txt
-          key: last-commit-${{ env.REPO }}-${{ env.REF }}
+          key: last-commit-\( {{ env.REPO }}- \){{ env.REF }}
