@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (Magisk/KernelSU)
+name: Build Android Native arm64 llama-server with Release & Artifact cleanup
 
 on:
   workflow_dispatch:
@@ -15,39 +15,102 @@ on:
         description: 'Release 或 Debug'
         required: true
         default: 'Release'
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 0 点检查更新
 
 env:
+  REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
+  REF: ${{ github.event.inputs.ref || 'master' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
-  PORTABLE_DIR: llama-server-android-arm64-native
   NDK_VERSION: r27d
+  RELEASE_TAG_PREFIX: "llama-server-android-"
+  RELEASE_NAME_PREFIX: "llama-server Android arm64 "
+  ARTIFACT_NAME: "llama-server-android-arm64-native"   # artifact 名称（现为单个文件）
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装构建工具
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+      - name: 安装 CMake
+        uses: jwlawson/actions-setup-cmake@v1.14
+        with:
+          cmake-version: '3.27.x'
 
-      - name: 下载 Android NDK r27d LTS
+      - name: 安装 Ninja
+        uses: ssciwr/setup-ninja@v1
+        with:
+          ninja-version: '1.11.1'
+
+      - name: 安装 Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
+
+      - name: 获取上游仓库最新 commit SHA
+        id: get_commit
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O ndk.zip
-          unzip -q ndk.zip
-          mv android-ndk-${{ env.NDK_VERSION }} $HOME/android-ndk
-          echo "ANDROID_NDK=$HOME/android-ndk" >> $GITHUB_ENV
+          SHA=$(git ls-remote https://github.com/${{ env.REPO }}.git ${{ env.REF }} | cut -f1)
+          echo "LATEST_SHA=$SHA" >> $GITHUB_ENV
+          echo "latest_sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: 恢复上次构建的 commit 缓存
+        id: cache-restore
+        uses: actions/cache/restore@v3
+        with:
+          path: last_commit.txt
+          key: last-commit-${{ env.REPO }}-${{ env.REF }}
+
+      - name: 判断是否需要构建
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            if [ -f last_commit.txt ]; then
+              LAST_SHA=$(cat last_commit.txt)
+              if [ "$LAST_SHA" == "${{ steps.get_commit.outputs.latest_sha }}" ]; then
+                echo "✅ 无新提交，跳过构建"
+                echo "skip=true" >> $GITHUB_OUTPUT
+              else
+                echo "🆕 检测到新提交，开始构建"
+                echo "skip=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "📦 首次运行或无历史缓存，开始构建"
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "🚀 手动触发，强制构建"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: 克隆 llama.cpp
-        run: |
-          git clone https://github.com/${{ inputs.repo }}.git --branch ${{ inputs.ref }} --depth 1 llama.cpp
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ env.REF }}
+          path: llama.cpp
+          fetch-depth: 1
 
-      - name: 配置 & 编译（原生 arm64 完全静态）
+      - name: 获取短 SHA
+        if: steps.check.outputs.skip != 'true'
+        working-directory: llama.cpp
+        run: |
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: 配置 & 编译
+        if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
           cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
             -DCMAKE_C_FLAGS="-march=armv8.7a" \
@@ -57,57 +120,83 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
-            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -G Ninja
-          # 关键修复：加上双引号 + 正确写法，防止任何转义
-          cmake --build . --config "${{ inputs.build_type }}" -j $(nproc)
+          cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
-      - name: 打包原生便携 ZIP（单文件静态 + Magisk 说明）
-        working-directory: llama.cpp
+      # ---------- 🔥 修改：直接准备二进制文件，不再打包 ----------
+      - name: 准备二进制文件
+        if: steps.check.outputs.skip != 'true'
         run: |
-          mkdir -p ${{ env.PORTABLE_DIR }}
-          
-          # 复制静态二进制（根目录，方便 adb push / Magisk system/bin）
-          cp ${{ env.BUILD_DIR }}/bin/llama-server ${{ env.PORTABLE_DIR }}/llama-server
-          
-          # Magisk/KernelSU 专用说明文件
-          cat > ${{ env.PORTABLE_DIR }}/README.txt <<-'EOF'
-            【Android 原生 arm64 llama-server（Magisk/KernelSU 专用）】
-            完全静态编译 · 零依赖 · 直接运行
+          cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
+          chmod +x ./llama-server
 
-            === 手动运行（推荐测试）===
-            1. adb push llama-server /data/local/tmp/
-            2. adb shell
-            3. chmod 755 /data/local/tmp/llama-server
-            4. /data/local/tmp/llama-server -m /sdcard/model.gguf --host 0.0.0.0 --port 8080 -c 4096 -ngl 0
-
-            === Magisk/KernelSU 模块挂载（开机自动可用）===
-            1. 新建模块，把 llama-server 放到 system/bin/llama-server
-            2. module.prop 示例：
-               id=llama-server
-               name=llama-server
-               version=1.0
-               versionCode=1
-               author=you
-               description=llama-server arm64
-            3. service.sh（可选自动启动）：
-               #!/system/bin/sh
-               /system/bin/llama-server -m /data/adb/llama/model.gguf --port 8080 --host 0.0.0.0 -ngl 0 > /data/adb/llama.log 2>&1 &
-            4. 安装模块 → 重启
-
-            WebUI: http://手机IP:8080
-            模型建议放 /sdcard/Download/ 或 /data/adb/llama/
-          EOF
-
-      - name: 压缩成 ZIP
-        working-directory: llama.cpp
-        run: |
-          cd ${{ env.PORTABLE_DIR }}
-          zip -r ../../llama-server-android-arm64-native.zip .
-
+      # ---------- 上传 Artifact（保留 15 天）----------
       - name: 上传 Artifact
+        if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-android-arm64-native
-          path: llama-server-android-arm64-native.zip
-          retention-days: 30
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ./llama-server          # 直接上传二进制文件
+          retention-days: 15
+
+      # ---------- 创建 Release 标签和名称 ----------
+      - name: 创建 Release 标签和名称
+        if: steps.check.outputs.skip != 'true' && success()
+        id: release_meta
+        run: |
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
+          TAG="${{ env.RELEASE_TAG_PREFIX }}${TIMESTAMP}-${{ env.SHORT_SHA }}"
+          NAME="${{ env.RELEASE_NAME_PREFIX }}${TIMESTAMP} (${{ env.SHORT_SHA }})"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+
+      # ---------- 🔥 修改：上传二进制文件到 Release ----------
+      - name: 上传 Release 资产
+        if: steps.check.outputs.skip != 'true' && success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          body: 自动构建于 ${{ steps.release_meta.outputs.name }}
+          files: ./llama-server        # 直接上传二进制
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 清理旧 Releases ----------
+      - name: 清理旧 Releases
+        if: always()
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 清理旧 Artifacts ----------
+      - name: 清理旧 Artifacts
+        if: always()
+        uses: kolpav/purge-artifacts-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifact-name: ${{ env.ARTIFACT_NAME }}
+          keep-latest: 3
+
+      # ---------- 清理旧的 Workflow 运行记录 ----------
+      - name: 清理旧的 Workflow 运行记录
+        if: always()
+        uses: gitjhb/clean-up-workflows@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          keep_minimum_runs: 3
+
+      # ---------- 保存本次构建的 commit SHA ----------
+      - name: 保存本次 commit SHA
+        if: steps.check.outputs.skip != 'true' && success()
+        run: echo "${{ steps.get_commit.outputs.latest_sha }}" > last_commit.txt
+
+      - name: 缓存本次 commit SHA
+        if: steps.check.outputs.skip != 'true' && success()
+        uses: actions/cache/save@v3
+        with:
+          path: last_commit.txt
+          key: last-commit-${{ env.REPO }}-${{ env.REF }}
