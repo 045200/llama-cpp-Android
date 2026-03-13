@@ -26,7 +26,7 @@ env:
   NDK_VERSION: r27d
   RELEASE_TAG_PREFIX: "llama-server-android-"
   RELEASE_NAME_PREFIX: "llama-server Android arm64 "
-  ARTIFACT_NAME: "llama-server-android-arm64-native"   # artifact 名称（现为单个文件）
+  ARTIFACT_NAME: "llama-server-android-arm64-native"
 
 permissions:
   contents: write
@@ -37,14 +37,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: 安装 CMake
-        uses: jwlawson/actions-setup-cmake@v1.14
+        uses: jwlawson/actions-setup-cmake@v2   # 已更新为 v2
         with:
           cmake-version: '3.27.x'
 
       - name: 安装 Ninja
-        uses: ssciwr/setup-ninja@v1
+        uses: wirekang/setup-ninja@v1   # 替换不存在的 ssciwr/setup-ninja
         with:
-          ninja-version: '1.11.1'
+          platform: linux
+          tag: v1.11.1
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
@@ -55,7 +56,7 @@ jobs:
       - name: 获取上游仓库最新 commit SHA
         id: get_commit
         run: |
-          SHA=$(git ls-remote https://github.com/${{ env.REPO }}.git ${{ env.REF }} | cut -f1)
+          SHA=\( (git ls-remote https://github.com/ \){{ env.REPO }}.git ${{ env.REF }} | cut -f1)
           echo "LATEST_SHA=$SHA" >> $GITHUB_ENV
           echo "latest_sha=$SHA" >> $GITHUB_OUTPUT
 
@@ -64,7 +65,7 @@ jobs:
         uses: actions/cache/restore@v3
         with:
           path: last_commit.txt
-          key: last-commit-${{ env.REPO }}-${{ env.REF }}
+          key: last-commit-\( {{ env.REPO }}- \){{ env.REF }}
 
       - name: 判断是否需要构建
         id: check
@@ -72,7 +73,7 @@ jobs:
           if [ "${{ github.event_name }}" == "schedule" ]; then
             if [ -f last_commit.txt ]; then
               LAST_SHA=$(cat last_commit.txt)
-              if [ "$LAST_SHA" == "${{ steps.get_commit.outputs.latest_sha }}" ]; then
+              if [ "\( LAST_SHA" == " \){{ steps.get_commit.outputs.latest_sha }}" ]; then
                 echo "✅ 无新提交，跳过构建"
                 echo "skip=true" >> $GITHUB_OUTPUT
               else
@@ -124,73 +125,82 @@ jobs:
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
-      # ---------- 🔥 修改：直接准备二进制文件，不再打包 ----------
       - name: 准备二进制文件
         if: steps.check.outputs.skip != 'true'
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
 
-      # ---------- 上传 Artifact（保留 15 天）----------
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ./llama-server          # 直接上传二进制文件
+          path: ./llama-server
           retention-days: 15
 
-      # ---------- 创建 Release 标签和名称 ----------
       - name: 创建 Release 标签和名称
         if: steps.check.outputs.skip != 'true' && success()
         id: release_meta
         run: |
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          TAG="${{ env.RELEASE_TAG_PREFIX }}${TIMESTAMP}-${{ env.SHORT_SHA }}"
-          NAME="${{ env.RELEASE_NAME_PREFIX }}${TIMESTAMP} (${{ env.SHORT_SHA }})"
+          TAG="\( {{ env.RELEASE_TAG_PREFIX }} \){TIMESTAMP}-${{ env.SHORT_SHA }}"
+          NAME="\( {{ env.RELEASE_NAME_PREFIX }} \){TIMESTAMP} (${{ env.SHORT_SHA }})"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "name=$NAME" >> $GITHUB_OUTPUT
 
-      # ---------- 🔥 修改：上传二进制文件到 Release ----------
       - name: 上传 Release 资产
         if: steps.check.outputs.skip != 'true' && success()
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2   # 已更新为 v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
           body: 自动构建于 ${{ steps.release_meta.outputs.name }}
-          files: ./llama-server        # 直接上传二进制
+          files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- 清理旧 Releases ----------
+      # ---------- 清理旧 Releases（替换为活跃版本）----------
       - name: 清理旧 Releases
         if: always()
-        uses: dev-drprasad/delete-older-releases@v0.2.1
+        uses: jay2610/delete-older-releases@1.0.0
         with:
           keep_latest: 3
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- 清理旧 Artifacts ----------
+      # ---------- 清理旧 Artifacts（替换为官方可靠脚本）----------
       - name: 清理旧 Artifacts
         if: always()
-        uses: kolpav/purge-artifacts-action@v1
+        uses: actions/github-script@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          artifact-name: ${{ env.ARTIFACT_NAME }}
-          keep-latest: 3
+          script: |
+            const name = '${{ env.ARTIFACT_NAME }}';
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner: context.repo.owner, repo: context.repo.repo }
+            );
+            const sorted = artifacts
+              .filter(a => a.name === name)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            for (let i = 3; i < sorted.length; i++) {
+              console.log(`Deleting old artifact: ${sorted[i].name} (ID: ${sorted[i].id})`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: sorted[i].id
+              });
+            }
 
-      # ---------- 清理旧的 Workflow 运行记录 ----------
+      # ---------- 清理旧的 Workflow 运行记录（替换为活跃版本）----------
       - name: 清理旧的 Workflow 运行记录
         if: always()
-        uses: gitjhb/clean-up-workflows@v1
+        uses: dmvict/clean-workflow-runs@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          keep_minimum_runs: 3
+          save_min_runs_number: 3
 
-      # ---------- 保存本次构建的 commit SHA ----------
-      - name: 保存本次 commit SHA
+      - name: 保存本次构建的 commit SHA
         if: steps.check.outputs.skip != 'true' && success()
         run: echo "${{ steps.get_commit.outputs.latest_sha }}" > last_commit.txt
 
@@ -199,4 +209,4 @@ jobs:
         uses: actions/cache/save@v3
         with:
           path: last_commit.txt
-          key: last-commit-${{ env.REPO }}-${{ env.REF }}
+          key: last-commit-\( {{ env.REPO }}- \){{ env.REF }}
