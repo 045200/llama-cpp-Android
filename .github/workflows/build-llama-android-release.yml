@@ -31,15 +31,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装 CMake（最新稳定版）
+      - name: 安装 CMake（第三方最新稳定版 v2.2.0）
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.27.x'
 
-      - name: 安装 Ninja（系统原生，最稳定）
+      - name: 安装 Ninja（官方原生，最稳定）
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: 安装 Android NDK（LTS 稳定版）
+      - name: 安装 Android NDK（第三方最新稳定版 v1.6.0）
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
@@ -55,9 +55,9 @@ jobs:
           echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
 
-      - name: 恢复上次构建的 Tag 缓存（v5 最新版）
+      - name: 恢复上次构建的 Tag 缓存（官方最新 v5.0.4）
         id: cache-restore
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v5
         with:
           path: last_tag.txt
           key: last-tag-${{ env.REPO }}
@@ -84,7 +84,7 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: 克隆 llama.cpp（使用最新稳定 Tag）
+      - name: 克隆 llama.cpp（官方最新 v6.0.2，使用最新稳定 Tag）
         if: steps.check.outputs.skip != 'true'
         uses: actions/checkout@v6
         with:
@@ -125,7 +125,7 @@ jobs:
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
 
-      - name: 上传 Artifact（15天后自动删除）
+      - name: 上传 Artifact（官方最新 v7.0.0，15天后自动删除）
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
         with:
@@ -143,7 +143,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "name=$NAME" >> $GITHUB_OUTPUT
 
-      - name: 上传 Release 资产
+      - name: 上传 Release 资产（第三方最新 v2.6.1）
         if: steps.check.outputs.skip != 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
@@ -153,9 +153,9 @@ jobs:
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ========== 清理部分（始终执行，保持仓库整洁）==========
+      # ========== 清理部分（官方 gh cli，最稳定可靠）==========
 
-      - name: 清理旧 Releases（保留最新 3 个，同时删除 Tag）
+      - name: 清理旧 Releases（保留最新 3 个，同时删除关联 Tag）
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -167,19 +167,21 @@ jobs:
 
       - name: 清理旧的 Workflow 运行记录（保留最新 3 个）
         if: always()
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          keep_minimum_runs: 3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --limit 100 --json databaseId,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:][] | .databaseId' | while read id; do
+            echo "删除旧 Workflow Run: $id"
+            gh run delete "$id" --yes
+          done
 
       - name: 保存本次构建的稳定 Tag
         if: steps.check.outputs.skip != 'true' && success()
         run: echo "${{ steps.get_tag.outputs.latest_tag }}" > last_tag.txt
 
-      - name: 缓存本次稳定 Tag（v5 最新版）
+      - name: 缓存本次稳定 Tag（官方最新 v5.0.4）
         if: steps.check.outputs.skip != 'true' && success()
-        uses: actions/cache/save@v5
+        uses: actions/cache@v5
         with:
           path: last_tag.txt
           key: last-tag-${{ env.REPO }}
