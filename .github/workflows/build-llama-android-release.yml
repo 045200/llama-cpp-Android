@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (OpenMP + AArch64 Repack + 彻底静态链接)
+name: Build Android Native arm64 llama-server
 
 on:
   workflow_dispatch:
