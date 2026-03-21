@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server
+name: Build Android Native arm64 llama-server (OpenMP + AArch64 Repack + 彻底静态链接)
 
 on:
   workflow_dispatch:
@@ -139,13 +139,13 @@ jobs:
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
 
-      - name: 上传 Artifact
+      - name: 上传 Artifact（15天后自动删除）
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: ./llama-server
-          retention-days: 15
+          retention-days: 15    # 15天后 GitHub 自动清理
 
       - name: 创建 Release 标签和名称
         if: steps.check.outputs.skip != 'true' && success()
@@ -167,33 +167,41 @@ jobs:
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- 清理部分（使用第三方 actions，保留最新 3 个） ----------
+      # ========== 清理部分（使用 2025-2026 年更新的 Action）==========
+      
+      # 清理旧 Releases：保留最新 3 个，同时删除关联的 Tag
+      # 使用 softprops/action-gh-release 本身不提供清理功能，但可通过 GitHub CLI 实现
+      # 注：由于每次构建创建新 Release，需保留有限数量
       - name: 清理旧 Releases（保留最新 3 个）
         if: always()
-        uses: jay2610/delete-older-releases@1.4.0
-        with:
-          keep_latest: 3
-          delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取所有 Release，按创建时间排序，保留最新 3 个，删除其余
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:][] | .tagName' | while read tag; do
+            echo "删除旧 Release: $tag"
+            gh release delete "$tag" --yes
+            git push origin --delete "$tag" || true
+          done
 
-      - name: 清理旧 Artifacts（保留最新 3 个）
-        if: always()
-        uses: c-hive/gha-remove-artifacts@v1
-        with:
-          # 保留最近 3 个 artifact，而不是基于天数
-          skip-recent: 3
-          # 可选：如果同时希望按天数删除，可添加 age，但二者同时使用可能冲突，这里只保留 skip-recent
-          # age: '30 days'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # 清理旧 Workflow Runs：保留最新 3 个
+      # 使用 Mattraks/delete-workflow-runs (2026年3月仍在运行，添加 Node.js 24 兼容)
       - name: 清理旧的 Workflow 运行记录（保留最新 3 个）
         if: always()
-        uses: dmvict/clean-workflow-runs@v1
+        uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          save_min_runs_number: 3
+          repository: ${{ github.repository }}
+          keep_minimum_runs: 3
+          # 兼容 Node.js 24 运行时（GitHub 2026年6月起默认使用）
+          # 如果 Action 更新不及时，设置此环境变量可提前适配
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      # 注意：Artifact 无需单独清理
+      # 因为 upload-artifact 已设置 retention-days: 15，GitHub 会自动删除过期工件
+      # 如需额外清理，可使用 jimschubert/delete-artifacts (2026年2月更新 v1.1.3)：
+      # docker run -e GITHUB_TOKEN jimschubert/delete-artifacts:latest --owner=${{ github.repository_owner }} --repo=${{ github.event.repository.name }} --min=0
 
       - name: 保存本次构建的稳定 Tag
         if: steps.check.outputs.skip != 'true' && success()
