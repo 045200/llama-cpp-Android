@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (OpenMP + AArch64 Repack)
+name: Build Android Native arm64 llama-server (OpenMP + AArch64 Repack + 彻底静态链接)
 
 on:
   workflow_dispatch:
@@ -25,8 +25,8 @@ env:
   BUILD_DIR: build-android
   NDK_VERSION: r27d
   RELEASE_TAG_PREFIX: "llama-server-android-"
-  RELEASE_NAME_PREFIX: "llama-server Android arm64 (OpenMP + Repack) "
-  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack"
+  RELEASE_NAME_PREFIX: "llama-server Android arm64 (OpenMP + Repack 彻底静态) "
+  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static"
 
 permissions:
   contents: write
@@ -76,7 +76,7 @@ jobs:
           if [ "${{ github.event_name }}" == "schedule" ]; then
             if [ -f last_tag.txt ]; then
               LAST_TAG=$(cat last_tag.txt)
-              if [ "$LAST_TAG" == "${{ steps.get_tag.outputs.latest_tag }}" ]; then
+              if [ "\( LAST_TAG" == " \){{ steps.get_tag.outputs.latest_tag }}" ]; then
                 echo "✅ 无新稳定 Tag（bXXXX 未更新），跳过构建"
                 echo "skip=true" >> $GITHUB_OUTPUT
               else
@@ -107,7 +107,7 @@ jobs:
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: 配置 & 编译 (OpenMP + AArch64 Repack, 静态链接所有依赖)
+      - name: 配置 & 编译 (OpenMP 彻底静态 + AArch64 Repack)
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -120,6 +120,8 @@ jobs:
             -DCMAKE_C_FLAGS="-march=armv8.7a" \
             -DCMAKE_CXX_FLAGS="-march=armv8.7a" \
             -DGGML_OPENMP=ON \
+            -DOpenMP_C_FLAGS="-fopenmp -static-openmp" \
+            -DOpenMP_CXX_FLAGS="-fopenmp -static-openmp" \
             -DGGML_LLAMAFILE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
@@ -127,7 +129,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_CPU_AARCH64_ARCH_VERIFY=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
@@ -150,8 +152,8 @@ jobs:
         id: release_meta
         run: |
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          TAG="${{ env.RELEASE_TAG_PREFIX }}${TIMESTAMP}-${{ steps.get_tag.outputs.latest_tag }}"
-          NAME="${{ env.RELEASE_NAME_PREFIX }}${TIMESTAMP} (Tag ${{ steps.get_tag.outputs.latest_tag }})"
+          TAG="\( {{ env.RELEASE_TAG_PREFIX }} \){TIMESTAMP}-${{ steps.get_tag.outputs.latest_tag }}"
+          NAME="\( {{ env.RELEASE_NAME_PREFIX }} \){TIMESTAMP} (Tag ${{ steps.get_tag.outputs.latest_tag }})"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "name=$NAME" >> $GITHUB_OUTPUT
 
@@ -161,7 +163,7 @@ jobs:
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
-          body: 自动构建于 ${{ steps.release_meta.outputs.name }} (OpenMP + AArch64 repack, armv8.7a, 静态链接, 基于上游稳定 Tag ${{ steps.get_tag.outputs.latest_tag }})
+          body: 自动构建于 ${{ steps.release_meta.outputs.name }} (OpenMP 彻底静态链接 libomp.a + AArch64 repack + armv8.7a + 静态 STL，基于上游稳定 Tag ${{ steps.get_tag.outputs.latest_tag }})
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
 
