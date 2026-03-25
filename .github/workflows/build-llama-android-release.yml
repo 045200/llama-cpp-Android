@@ -138,7 +138,7 @@ jobs:
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
             **构建时间**: $(date -u +'%Y-%m-%d %H:%M UTC')
-            **特性**: OpenMP 彻底静态 + AArch64 repack + **骁龙7+ Gen2 Armv9-A 实机优化（Cortex-X2 + 3×A710 + 4×A510）** + **armv9-a+nosve+dotprod+i8mm**（已通过 Redmi Note 12 Turbo /proc/cpuinfo 验证） + c++_static STL
+            **特性**: OpenMP 彻底静态 + AArch64 repack + **适配Armv9-A系列CPU处理器** + **armv9-a+nosve+dotprod+i8mm** + c++_static STL
             **平台**: Android arm64-v8a (android-35+)
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
