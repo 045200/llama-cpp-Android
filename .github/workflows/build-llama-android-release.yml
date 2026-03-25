@@ -19,7 +19,7 @@ env:
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
-  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static"
+  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static-7plus-gen2-armv9"
 
 permissions:
   contents: write
@@ -88,7 +88,7 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置 & 编译
+      - name: 配置 & 编译（骁龙7+ Gen2 Armv9-A 实机优化版 + ThinLTO）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -97,9 +97,9 @@ jobs:
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-34 \
-            -DCMAKE_C_FLAGS="-march=armv8.7a" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.7a" \
+            -DANDROID_PLATFORM=android-35 \
+            -DCMAKE_C_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710 -O3 -flto=thin" \
+            -DCMAKE_CXX_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710 -O3 -flto=thin" \
             -DGGML_OPENMP=ON \
             -DOpenMP_C_FLAGS="-fopenmp -static-openmp" \
             -DOpenMP_CXX_FLAGS="-fopenmp -static-openmp" \
@@ -109,8 +109,10 @@ jobs:
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
-            -DGGML_CPU_AARCH64_ARCH_VERIFY=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
+            -DGGML_ARM_I8MM=ON \
+            -DGGML_ARM_DOTPROD=ON \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic -Wl,-s" \
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
@@ -137,7 +139,7 @@ jobs:
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
             **构建时间**: $(date -u +'%Y-%m-%d %H:%M UTC')
-            **特性**: OpenMP 彻底静态 + AArch64 repack + armv8.7a + c++_static STL
+            **特性**: OpenMP 彻底静态 + AArch64 repack + **骁龙7+ Gen2 Armv9-A 实机优化（Cortex-X2 + 3×A710 + 4×A510）** + **armv9-a+nosve+dotprod+i8mm**（已通过 Redmi Note 12 Turbo /proc/cpuinfo 验证） + c++_static STL + ThinLTO + 符号剥离
             **平台**: Android arm64-v8a (android-34+)
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
