@@ -19,7 +19,6 @@ env:
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
-  # 强制使用 Node.js 24 以避免弃用警告
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
@@ -27,7 +26,6 @@ permissions:
   actions: write
 
 jobs:
-  # 1. 获取最新 tag 并判断是否需要构建
   get_tag_and_check:
     runs-on: ubuntu-latest
     outputs:
@@ -38,16 +36,13 @@ jobs:
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.27.x'
-
       - name: 安装 Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
-
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
-
       - name: 获取上游最新稳定 Tag (bXXXX)
         id: get_tag
         uses: oprypin/find-latest-tag@v1
@@ -55,14 +50,12 @@ jobs:
           repository: ${{ env.REPO }}
           regex: '^b[0-9]+$'
           sort-tags: true
-
       - name: 恢复上次 Tag 缓存
         id: cache-restore
         uses: actions/cache@v5
         with:
           path: last_tag.txt
           key: last-tag-${{ env.REPO }}
-
       - name: 判断是否需要构建
         id: check
         run: |
@@ -71,7 +64,6 @@ jobs:
             echo "should_build=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           if [ "${{ github.event_name }}" == "schedule" ]; then
             if [ -f last_tag.txt ] && [ "$(cat last_tag.txt)" = "$LATEST_TAG" ]; then
               echo "should_build=false" >> $GITHUB_OUTPUT
@@ -81,12 +73,10 @@ jobs:
           else
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
-
       - name: 保存 Tag 到输出
         run: echo "tag=${{ steps.get_tag.outputs.tag }}" >> $GITHUB_OUTPUT
         id: tag_out
 
-  # 2. 并行构建矩阵（三个配置）
   build:
     needs: get_tag_and_check
     if: needs.get_tag_and_check.outputs.should_build == 'true'
@@ -126,23 +116,18 @@ jobs:
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.27.x'
-
       - name: 安装 Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
-
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
-
-      # GPU 版本需要安装 glslc（Vulkan 着色器编译器）
       - name: 安装 glslc (仅 GPU 版本)
         if: matrix.name == 'cpu-gpu'
         run: |
           sudo apt-get update
           sudo apt-get install -y glslc
-
       - name: 克隆 llama.cpp
         uses: actions/checkout@v6
         with:
@@ -150,7 +135,6 @@ jobs:
           ref: ${{ needs.get_tag_and_check.outputs.latest_tag }}
           path: llama.cpp
           fetch-depth: 1
-
       - name: 配置 & 编译
         working-directory: llama.cpp
         run: |
@@ -172,12 +156,10 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
-
       - name: 准备二进制并重命名
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./${{ matrix.artifact_name }}
           chmod +x ./${{ matrix.artifact_name }}
-
       - name: 上传 Artifact
         uses: actions/upload-artifact@v7
         with:
@@ -185,7 +167,6 @@ jobs:
           path: ./${{ matrix.artifact_name }}
           retention-days: 15
 
-  # 3. 统一发布 Release
   release:
     needs: [get_tag_and_check, build]
     if: always() && needs.get_tag_and_check.outputs.should_build == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -195,10 +176,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-
       - name: 列出 artifacts
         run: ls -R ./artifacts
-
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
@@ -217,7 +196,6 @@ jobs:
             ./artifacts/llama-server-cpu-gpu/llama-server-cpu-gpu
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
-
       - name: 清理旧 Releases（保留最新 5 个）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -225,7 +203,6 @@ jobs:
           gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:][] | .tagName' | while read tag; do
             gh release delete "$tag" --cleanup-tag --yes
           done
-
       - name: 清理旧 Workflow Runs（保留最新 3 条）
         uses: Mattraks/delete-workflow-runs@v2
         with:
@@ -233,10 +210,8 @@ jobs:
           repository: ${{ github.repository }}
           retain_days: 0
           keep_minimum_runs: 3
-
       - name: 保存本次 Tag
         run: echo "${{ needs.get_tag_and_check.outputs.latest_tag }}" > last_tag.txt
-
       - name: 缓存 Tag
         uses: actions/cache@v5
         with:
