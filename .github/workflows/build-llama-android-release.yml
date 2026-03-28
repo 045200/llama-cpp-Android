@@ -121,10 +121,6 @@ jobs:
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
 
-      - name: 设置构建时间
-        if: steps.check.outputs.skip != 'true' && success()
-        run: echo "BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_ENV
-
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
@@ -141,7 +137,6 @@ jobs:
           name: llama-server Android arm64 - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **构建时间**: ${{ env.BUILD_DATE }}
             **特性**: OpenMP 彻底静态 + AArch64 repack + **适配Armv9-A系列CPU处理器** + **armv9-a+nosve+dotprod+i8mm** + c++_static STL
             **平台**: Android arm64-v8a (android-35+)
           files: ./llama-server
