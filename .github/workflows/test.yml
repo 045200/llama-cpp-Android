@@ -12,7 +12,7 @@ on:
         required: true
         default: 'Release'
   schedule:
-    - cron: '0 0 */3 * *'   # 每 3 天 UTC 0 点检测一次
+    - cron: '0 0 */3 * *'
 
 env:
   REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
@@ -42,7 +42,7 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
 
-      - name: 获取上游最新稳定 Tag (bXXXX)
+      - name: 获取上游最新稳定 Tag
         id: get_tag
         uses: oprypin/find-latest-tag@v1
         with:
@@ -93,13 +93,14 @@ jobs:
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
           echo "OPENCL_HEADERS=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
 
-      - name: 创建虚拟 OpenCL 库（用于链接时绕过缺少 .so 的问题）
+      - name: 创建 ARM64 虚拟 OpenCL 库（stub）
         if: steps.check.outputs.skip != 'true'
         run: |
           mkdir -p fake-opencl
-          cd fake-opencl
-          echo "" | $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -shared -x c -o libOpenCL.so -
-          echo "FAKE_OPENCL_LIB=$(pwd)/libOpenCL.so" >> $GITHUB_ENV
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang \
+            --target=aarch64-none-linux-android35 \
+            -shared -x c -o fake-opencl/libOpenCL.so /dev/null
+          echo "FAKE_OPENCL_LIB=$(pwd)/fake-opencl/libOpenCL.so" >> $GITHUB_ENV
 
       - name: 配置 & 编译（仅构建 llama-server，静态链接 C++ 库）
         if: steps.check.outputs.skip != 'true'
@@ -136,7 +137,6 @@ jobs:
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
-          # 可选：移除调试符号以减小体积
           strip ./llama-server
 
       - name: 上传 Artifact
@@ -147,7 +147,7 @@ jobs:
           path: ./llama-server
           retention-days: 15
 
-      - name: 清理旧 Workflow Runs（保留最新 3 条）
+      - name: 清理旧 Workflow Runs
         if: always()
         uses: Mattraks/delete-workflow-runs@v2
         with:
