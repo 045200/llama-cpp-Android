@@ -92,10 +92,8 @@ jobs:
       - name: 创建 OpenCL stub 库（供 CMake 检测通过）
         if: steps.check.outputs.skip != 'true'
         run: |
-          # NDK 的库目录
           NDK_SYSROOT_LIB="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
           sudo mkdir -p "$NDK_SYSROOT_LIB"
-          # 创建一个空的 .so 文件，仅用于满足 CMake 的 find_library
           sudo touch "$NDK_SYSROOT_LIB/libOpenCL.so"
 
       # ---------- 构建 All-in-One 版本 (OpenMP + OpenCL) ----------
@@ -106,15 +104,18 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # 设置 OpenCL 头文件路径（NDK 自带）
+          # OpenCL 头文件路径（NDK 自带）
           OPENCL_INCLUDE_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+
+          # 公共编译器标志，强制加入 OpenCL 头文件目录
+          COMMON_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710 -I${OPENCL_INCLUDE_DIR}"
 
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-35 \
-            -DCMAKE_C_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
-            -DCMAKE_CXX_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
+            -DCMAKE_C_FLAGS="$COMMON_FLAGS" \
+            -DCMAKE_CXX_FLAGS="$COMMON_FLAGS" \
             -DGGML_OPENMP=ON \
             -DOpenMP_C_FLAGS="-fopenmp -static-openmp" \
             -DOpenMP_CXX_FLAGS="-fopenmp -static-openmp" \
