@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server
+name: Build Android Native arm64 llama-server (All-in-One)
 
 on:
   workflow_dispatch:
@@ -17,9 +17,9 @@ on:
 env:
   REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
-  BUILD_DIR: build-android
   NDK_VERSION: r27d
-  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static-7plus-gen2-armv9"
+  # 唯一的产物名称
+  ARTIFACT_NAME: "llama-server-android-arm64-allinone-7plus-gen2-armv9"
 
 permissions:
   contents: write
@@ -88,7 +88,8 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置 & 编译（骁龙7+ Gen2 Armv9-A 实机优化版，无LTO/无符号剥离/无显式-O3）
+      # ---------- 构建 All-in-One 版本 (OpenMP + OpenCL) ----------
+      - name: 配置 & 编译 All-in-One 版
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -107,6 +108,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
+            -DGGML_OPENCL=ON \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_ARM_I8MM=ON \
@@ -121,6 +123,7 @@ jobs:
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
 
+      # ---------- 上传 Artifact ----------
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
@@ -129,6 +132,7 @@ jobs:
           path: ./llama-server
           retention-days: 15
 
+      # ---------- 发布 Release ----------
       - name: 发布 Release
         if: steps.check.outputs.skip != 'true' && success()
         uses: softprops/action-gh-release@v2
@@ -137,12 +141,17 @@ jobs:
           name: llama-server Android arm64 - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **特性**: OpenMP 彻底静态 + AArch64 repack + **适配Armv9-A系列CPU处理器** + **armv9-a+nosve+dotprod+i8mm** + c++_static STL
+            **特性**: 集成 OpenMP + OpenCL 后端，适配Armv9-A系列 (armv9-a+nosve+dotprod+i8mm, cortex-a710 tune)
             **平台**: Android arm64-v8a (android-35+)
+            
+            **使用说明**: 通过 `-ngl` 参数控制：
+            - **纯CPU推理**: `-ngl 0`
+            - **OpenCL GPU加速**: `-ngl 999` (或任何正数)
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
 
+      # ---------- 清理旧版本 ----------
       - name: 清理旧 Releases（保留最新 5 个）
         if: always()
         env:
@@ -161,6 +170,7 @@ jobs:
           retain_days: 0
           keep_minimum_runs: 3
 
+      # ---------- 保存 Tag 缓存 ----------
       - name: 保存本次 Tag
         if: steps.check.outputs.skip != 'true' && success()
         run: echo "${{ steps.check.outputs.latest_tag }}" > last_tag.txt
