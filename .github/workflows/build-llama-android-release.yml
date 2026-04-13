@@ -129,6 +129,8 @@ jobs:
             -DGGML_ARM_I8MM=ON \
             -DGGML_ARM_DOTPROD=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
+            -DOpenCL_INCLUDE_DIR="${OPENCL_HEADER_DIR}" \
+            -DOpenCL_LIBRARY="${NDK_LIB_PATH}/libOpenCL.so" \
             -G Ninja
 
           cmake --build . --config "${{ env.CMAKE_BUILD_TYPE }}" -j $(nproc)
