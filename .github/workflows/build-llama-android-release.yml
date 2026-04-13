@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (CPU-Only)
+name: Build Android Native arm64 llama-server
 
 on:
   workflow_dispatch:
@@ -15,11 +15,11 @@ on:
     - cron: '0 0 */3 * *'   # 每 3 天 UTC 0 点检测一次
 
 env:
-  LLAMA_REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
-  CMAKE_BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
-  NDK_VERSION: r27d
+  REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
-  ARTIFACT_BASE_NAME: "llama-server-android-arm64"
+  NDK_VERSION: r27d
+  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static-7plus-gen2-armv9"
 
 permissions:
   contents: write
@@ -35,9 +35,7 @@ jobs:
           cmake-version: '3.27.x'
 
       - name: 安装 Ninja
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
@@ -49,16 +47,16 @@ jobs:
         id: get_tag
         uses: oprypin/find-latest-tag@v1
         with:
-          repository: ${{ env.LLAMA_REPO }}
+          repository: ${{ env.REPO }}
           regex: '^b[0-9]+$'
           sort-tags: true
 
       - name: 恢复上次 Tag 缓存
         id: cache-restore
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: last_tag.txt
-          key: last-tag-${{ env.LLAMA_REPO }}-${{ steps.get_tag.outputs.tag }}
+          key: last-tag-${{ env.REPO }}
 
       - name: 判断是否需要构建
         id: check
@@ -83,53 +81,39 @@ jobs:
 
       - name: 克隆 llama.cpp
         if: steps.check.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          repository: ${{ env.LLAMA_REPO }}
+          repository: ${{ env.REPO }}
           ref: ${{ steps.check.outputs.latest_tag }}
           path: llama.cpp
           fetch-depth: 1
 
-      # ---------- 构建 CPU 版本 (仅 OpenMP) ----------
-      - name: 配置 & 编译 CPU 版
+      - name: 配置 & 编译（骁龙7+ Gen2 Armv9-A 实机优化版，无LTO/无符号剥离/无显式-O3）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
-
-          # NDK 系统库路径
-          NDK_LIB_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
-
-          # 编译器优化标志
-          COMMON_FLAGS="-march=armv9-a -mtune=cortex-a710"
-
-          # 链接器标志：静态链接 OpenMP
-          LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic"
-
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-35 \
-            -DCMAKE_C_FLAGS="$COMMON_FLAGS" \
-            -DCMAKE_CXX_FLAGS="$COMMON_FLAGS" \
+            -DCMAKE_C_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
+            -DCMAKE_CXX_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
             -DGGML_OPENMP=ON \
+            -DOpenMP_C_FLAGS="-fopenmp -static-openmp" \
+            -DOpenMP_CXX_FLAGS="-fopenmp -static-openmp" \
             -DGGML_LLAMAFILE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
-            -DGGML_OPENCL=OFF \
-            -DGGML_VULKAN=OFF \
-            -DGGML_METAL=OFF \
-            -DGGML_CUDA=OFF \
-            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_ARM_I8MM=ON \
             -DGGML_ARM_DOTPROD=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
             -G Ninja
-
-          cmake --build . --config "${{ env.CMAKE_BUILD_TYPE }}" -j $(nproc)
+          cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
       - name: 准备二进制
         if: steps.check.outputs.skip != 'true'
@@ -139,27 +123,22 @@ jobs:
 
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.ARTIFACT_BASE_NAME }}-${{ steps.check.outputs.latest_tag }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: ./llama-server
           retention-days: 15
 
-      - name: 发布 Release (仅当定时触发且为新版本时)
-        if: |
-          steps.check.outputs.skip != 'true' &&
-          success() &&
-          github.event_name == 'schedule' &&
-          steps.check.outputs.latest_tag != ''
+      - name: 发布 Release
+        if: steps.check.outputs.skip != 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.check.outputs.latest_tag }}
           name: llama-server Android arm64 - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **特性**: 集成 OpenMP CPU 多线程后端，适配 Armv9-A 系列 (armv9-a, cortex-a710 tune)
+            **特性**: OpenMP 彻底静态 + AArch64 repack + **适配Armv9-A系列CPU处理器** + **armv9-a+nosve+dotprod+i8mm** + c++_static STL
             **平台**: Android arm64-v8a (android-35+)
-            **注意**: 本版本为纯 CPU 推理，不含 GPU 加速。
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
@@ -188,7 +167,7 @@ jobs:
 
       - name: 缓存 Tag
         if: steps.check.outputs.skip != 'true' && success()
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: last_tag.txt
-          key: last-tag-${{ env.LLAMA_REPO }}-${{ steps.check.outputs.latest_tag }}
+          key: last-tag-${{ env.REPO }}
