@@ -93,6 +93,14 @@ jobs:
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
           echo "OPENCL_HEADERS=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
 
+      - name: 创建虚拟 OpenCL 库（用于链接时绕过缺少 .so 的问题）
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          mkdir -p fake-opencl
+          cd fake-opencl
+          echo "" | $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -shared -x c -o libOpenCL.so -
+          echo "FAKE_OPENCL_LIB=$(pwd)/libOpenCL.so" >> $GITHUB_ENV
+
       - name: 配置 & 编译（仅构建 llama-server，静态链接 C++ 库）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
@@ -116,7 +124,7 @@ jobs:
             -DGGML_OPENCL=ON \
             -DGGML_OPENCL_EMBED_KERNELS=ON \
             -DOpenCL_INCLUDE_DIR=${{ env.OPENCL_HEADERS }} \
-            -DOpenCL_LIBRARY=OpenCL \
+            -DOpenCL_LIBRARY=${{ env.FAKE_OPENCL_LIB }} \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
