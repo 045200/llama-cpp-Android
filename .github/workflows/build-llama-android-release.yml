@@ -38,6 +38,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build opencl-headers
+          # 将 OpenCL 头文件复制到独立目录，避免污染 NDK sysroot
+          mkdir -p $GITHUB_WORKSPACE/opencl-include
+          cp -r /usr/include/CL $GITHUB_WORKSPACE/opencl-include/
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
@@ -106,8 +109,8 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # 系统安装的 OpenCL 头文件路径 (Ubuntu 20.04+ 位于 /usr/include/CL)
-          OPENCL_HEADER_DIR="/usr/include"
+          # 使用独立复制的 OpenCL 头文件目录，避免污染 NDK sysroot
+          OPENCL_HEADER_DIR="$GITHUB_WORKSPACE/opencl-include"
           # NDK 系统库路径（用于显式指定 libOpenCL.so 搜索位置）
           NDK_LIB_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
 
