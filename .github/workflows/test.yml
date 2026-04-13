@@ -93,7 +93,7 @@ jobs:
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
           echo "OPENCL_HEADERS=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
 
-      - name: 配置 & 编译（OpenCL 推理，适配骁龙7+ Gen2）
+      - name: 配置 & 编译（仅构建 llama-server，OpenCL 支持）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -117,8 +117,11 @@ jobs:
             -DGGML_OPENCL_EMBED_KERNELS=ON \
             -DOpenCL_INCLUDE_DIR=${{ env.OPENCL_HEADERS }} \
             -DOpenCL_LIBRARY=OpenCL \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
             -G Ninja
-          cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
+          cmake --build . --config "${{ env.BUILD_TYPE }}" --target llama-server -j $(nproc)
 
       - name: 准备二进制
         if: steps.check.outputs.skip != 'true'
