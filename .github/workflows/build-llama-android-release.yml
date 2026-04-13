@@ -34,8 +34,10 @@ jobs:
         with:
           cmake-version: '3.27.x'
 
-      - name: 安装 Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: 安装 Ninja 和 OpenCL 头文件
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build opencl-headers
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
@@ -104,8 +106,8 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # 使用 llama.cpp 自带的 OpenCL 头文件
-          OPENCL_HEADER_DIR="$GITHUB_WORKSPACE/llama.cpp/ggml/src/ggml-opencl"
+          # 系统安装的 OpenCL 头文件路径 (Ubuntu 20.04+ 位于 /usr/include/CL)
+          OPENCL_HEADER_DIR="/usr/include"
           # NDK 系统库路径（用于显式指定 libOpenCL.so 搜索位置）
           NDK_LIB_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
 
