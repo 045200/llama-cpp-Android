@@ -12,7 +12,7 @@ on:
         required: true
         default: 'Release'
   schedule:
-    - cron: '0 0 */3 */*'   # 每 3 天 UTC 0 点检测一次
+    - cron: '0 0 */3 * *'   # 每 3 天 UTC 0 点检测一次
 
 env:
   REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
