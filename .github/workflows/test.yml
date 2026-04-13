@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (OpenCL)
+name: Build Android Native arm64 llama-server (OpenCL Portable)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ env:
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
-  ARTIFACT_NAME: "llama-server-android-arm64-opencl-repack-static-7plus-gen2"
+  ARTIFACT_NAME: "llama-server-android-arm64-opencl-portable"
 
 permissions:
   actions: write
@@ -93,7 +93,7 @@ jobs:
           git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
           echo "OPENCL_HEADERS=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
 
-      - name: 配置 & 编译（仅构建 llama-server，OpenCL 支持）
+      - name: 配置 & 编译（仅构建 llama-server，静态链接 C++ 库）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -128,6 +128,8 @@ jobs:
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
+          # 可选：移除调试符号以减小体积
+          strip ./llama-server
 
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
