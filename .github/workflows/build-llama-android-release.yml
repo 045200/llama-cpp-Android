@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (All-in-One)
+name: Build Android Native arm64 llama-server (CPU-Only)
 
 on:
   workflow_dispatch:
@@ -34,13 +34,10 @@ jobs:
         with:
           cmake-version: '3.27.x'
 
-      - name: 安装 Ninja 和 OpenCL 头文件
+      - name: 安装 Ninja
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build opencl-headers
-          # 将 OpenCL 头文件复制到独立目录，避免污染 NDK sysroot
-          mkdir -p $GITHUB_WORKSPACE/opencl-include
-          cp -r /usr/include/CL $GITHUB_WORKSPACE/opencl-include/
+          sudo apt-get install -y ninja-build
 
       - name: 安装 Android NDK
         uses: nttld/setup-ndk@v1
@@ -93,24 +90,22 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      # ---------- 构建 All-in-One 版本 (OpenMP + OpenCL) ----------
-      - name: 配置 & 编译 All-in-One 版
+      # ---------- 构建 CPU 版本 (仅 OpenMP) ----------
+      - name: 配置 & 编译 CPU 版
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # 独立 OpenCL 头文件目录
-          OPENCL_HEADER_DIR="$GITHUB_WORKSPACE/opencl-include"
-          # NDK 系统库路径（保留，但不用于 OpenCL 库）
+          # NDK 系统库路径
           NDK_LIB_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
 
-          # 精简的编译器标志
-          COMMON_FLAGS="-march=armv9-a -mtune=cortex-a710 -I${OPENCL_HEADER_DIR}"
+          # 编译器优化标志
+          COMMON_FLAGS="-march=armv9-a -mtune=cortex-a710"
 
-          # 链接器标志：静态链接 OpenMP，允许 OpenCL 符号未定义（运行时解析）
-          LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic -Wl,--allow-shlib-undefined"
+          # 链接器标志：静态链接 OpenMP
+          LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic"
 
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -123,14 +118,15 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
-            -DGGML_OPENCL=ON \
+            -DGGML_OPENCL=OFF \
+            -DGGML_VULKAN=OFF \
+            -DGGML_METAL=OFF \
+            -DGGML_CUDA=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_ARM_I8MM=ON \
             -DGGML_ARM_DOTPROD=ON \
             -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS" \
-            -DOpenCL_INCLUDE_DIR="${OPENCL_HEADER_DIR}" \
-            -DOpenCL_LIBRARY="" \
             -G Ninja
 
           cmake --build . --config "${{ env.CMAKE_BUILD_TYPE }}" -j $(nproc)
@@ -161,12 +157,9 @@ jobs:
           name: llama-server Android arm64 - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **特性**: 集成 OpenMP + OpenCL 后端，适配 Armv9-A 系列 (armv9-a, cortex-a710 tune)
+            **特性**: 集成 OpenMP CPU 多线程后端，适配 Armv9-A 系列 (armv9-a, cortex-a710 tune)
             **平台**: Android arm64-v8a (android-35+)
-
-            **使用说明**: 通过 `-ngl` 参数控制：
-            - **纯CPU推理**: `-ngl 0`
-            - **OpenCL GPU加速**: `-ngl 999` (或任何正数)
+            **注意**: 本版本为纯 CPU 推理，不含 GPU 加速。
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
