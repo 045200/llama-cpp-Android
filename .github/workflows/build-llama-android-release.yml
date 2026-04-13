@@ -104,11 +104,11 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # OpenCL 头文件路径（NDK 自带）
-          OPENCL_INCLUDE_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+          # 使用 llama.cpp 自带的 OpenCL 头文件 (ggml/src/ggml-opencl)
+          OPENCL_HEADER_DIR="$GITHUB_WORKSPACE/llama.cpp/ggml/src/ggml-opencl"
 
-          # 公共编译器标志，强制加入 OpenCL 头文件目录
-          COMMON_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710 -I${OPENCL_INCLUDE_DIR}"
+          # 公共编译器标志（强制加入 OpenCL 头文件搜索路径）
+          COMMON_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710 -I${OPENCL_HEADER_DIR}"
 
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -124,7 +124,6 @@ jobs:
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
             -DGGML_OPENCL=ON \
-            -DOpenCL_INCLUDE_DIR="$OPENCL_INCLUDE_DIR" \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_ARM_I8MM=ON \
