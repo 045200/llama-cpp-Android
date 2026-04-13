@@ -93,14 +93,6 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      # ---------- 创建 OpenCL 存根库 ----------
-      - name: 创建 OpenCL stub 库（供 CMake 检测通过）
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          NDK_SYSROOT_LIB="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
-          sudo mkdir -p "$NDK_SYSROOT_LIB"
-          sudo touch "$NDK_SYSROOT_LIB/libOpenCL.so"
-
       # ---------- 构建 All-in-One 版本 (OpenMP + OpenCL) ----------
       - name: 配置 & 编译 All-in-One 版
         if: steps.check.outputs.skip != 'true'
@@ -109,13 +101,16 @@ jobs:
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
 
-          # 使用独立复制的 OpenCL 头文件目录，避免污染 NDK sysroot
+          # 独立 OpenCL 头文件目录
           OPENCL_HEADER_DIR="$GITHUB_WORKSPACE/opencl-include"
-          # NDK 系统库路径（用于显式指定 libOpenCL.so 搜索位置）
+          # NDK 系统库路径（保留，但不用于 OpenCL 库）
           NDK_LIB_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
 
-          # 精简的编译器标志（移除冗余特性）
+          # 精简的编译器标志
           COMMON_FLAGS="-march=armv9-a -mtune=cortex-a710 -I${OPENCL_HEADER_DIR}"
+
+          # 链接器标志：静态链接 OpenMP，允许 OpenCL 符号未定义（运行时解析）
+          LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic -Wl,--allow-shlib-undefined"
 
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -133,9 +128,9 @@ jobs:
             -DGGML_CPU_AARCH64_REPACK=ON \
             -DGGML_ARM_I8MM=ON \
             -DGGML_ARM_DOTPROD=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="-L${NDK_LIB_PATH} -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
+            -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS" \
             -DOpenCL_INCLUDE_DIR="${OPENCL_HEADER_DIR}" \
-            -DOpenCL_LIBRARY="${NDK_LIB_PATH}/libOpenCL.so" \
+            -DOpenCL_LIBRARY="" \
             -G Ninja
 
           cmake --build . --config "${{ env.CMAKE_BUILD_TYPE }}" -j $(nproc)
