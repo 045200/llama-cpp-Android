@@ -1,0 +1,165 @@
+name: Build Android Native arm64 llama-server (OpenCL Portable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'llama.cpp 仓库 (owner/repo)'
+        required: true
+        default: 'ggml-org/llama.cpp'
+      build_type:
+        description: 'Release 或 Debug'
+        required: true
+        default: 'Release'
+  schedule:
+    - cron: '0 0 */3 * *'   # 每 3 天 UTC 0 点检测一次
+
+env:
+  REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
+  BUILD_DIR: build-android
+  NDK_VERSION: r27d
+  ARTIFACT_NAME: "llama-server-android-arm64-opencl-portable"
+
+permissions:
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装 CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.27.x'
+
+      - name: 安装 Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: 安装 Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
+
+      - name: 获取上游最新稳定 Tag (bXXXX)
+        id: get_tag
+        uses: oprypin/find-latest-tag@v1
+        with:
+          repository: ${{ env.REPO }}
+          regex: '^b[0-9]+$'
+          sort-tags: true
+
+      - name: 恢复上次 Tag 缓存
+        id: cache-restore
+        uses: actions/cache@v5
+        with:
+          path: last_tag.txt
+          key: last-tag-${{ env.REPO }}
+
+      - name: 判断是否需要构建
+        id: check
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.tag }}"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            if [ -f last_tag.txt ] && [ "$(cat last_tag.txt)" = "$LATEST_TAG" ]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: 检出当前仓库（为了使用根目录的 libOpenCL.so）
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          path: repo-root
+
+      - name: 克隆 llama.cpp
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ steps.check.outputs.latest_tag }}
+          path: llama.cpp
+          fetch-depth: 1
+
+      - name: 获取 OpenCL 头文件
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git
+          echo "OPENCL_HEADERS=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
+
+      - name: 配置 & 编译（仅构建 llama-server，静态链接 C++ 库）
+        if: steps.check.outputs.skip != 'true'
+        working-directory: llama.cpp
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}
+          cd ${{ env.BUILD_DIR }}
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-35 \
+            -DCMAKE_C_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
+            -DCMAKE_CXX_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DANDROID_STL=c++_static \
+            -DGGML_BLAS=OFF \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DGGML_CPU_AARCH64_REPACK=ON \
+            -DGGML_ARM_I8MM=ON \
+            -DGGML_ARM_DOTPROD=ON \
+            -DGGML_OPENMP=OFF \
+            -DGGML_OPENCL=ON \
+            -DGGML_OPENCL_EMBED_KERNELS=ON \
+            -DOpenCL_INCLUDE_DIR=${{ env.OPENCL_HEADERS }} \
+            -DOpenCL_LIBRARY=${{ github.workspace }}/repo-root/libOpenCL.so \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined" \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -G Ninja
+          cmake --build . --config "${{ env.BUILD_TYPE }}" --target llama-server -j $(nproc)
+
+      - name: 准备二进制
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
+          chmod +x ./llama-server
+          strip ./llama-server
+
+      - name: 上传 Artifact
+        if: steps.check.outputs.skip != 'true' && success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ./llama-server
+          retention-days: 15
+
+      - name: 清理旧 Workflow Runs（保留最新 3 条）
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 3
+
+      - name: 保存本次 Tag
+        if: steps.check.outputs.skip != 'true' && success()
+        run: echo "${{ steps.check.outputs.latest_tag }}" > last_tag.txt
+
+      - name: 缓存 Tag
+        if: steps.check.outputs.skip != 'true' && success()
+        uses: actions/cache@v5
+        with:
+          path: last_tag.txt
+          key: last-tag-${{ env.REPO }}
