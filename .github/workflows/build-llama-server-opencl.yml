@@ -129,19 +129,12 @@ jobs:
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" --target llama-server -j $(nproc)
 
-      - name: 准备二进制
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
-          chmod +x ./llama-server
-          strip ./llama-server
-
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ./llama-server
+          path: llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server
           retention-days: 15
 
       - name: 清理旧 Workflow Runs（保留最新 3 条）
