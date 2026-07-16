@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server
+name: Build Android Native arm64 llama-server (Stable)
 
 on:
   workflow_dispatch:
@@ -12,14 +12,14 @@ on:
         required: true
         default: 'Release'
   schedule:
-    - cron: '0 0 */3 * *'   # 每 3 天 UTC 0 点检测一次
+    - cron: '0 0 */3 * *'
 
 env:
   REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
-  ARTIFACT_NAME: "llama-server-android-arm64-openmp-repack-static-7plus-gen2-armv9"
+  ARTIFACT_NAME: "llama-server-android-arm64-stable"
 
 permissions:
   contents: write
@@ -43,7 +43,7 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
 
-      - name: 获取上游最新稳定 Tag (bXXXX)
+      - name: 获取最新 Tag
         id: get_tag
         uses: oprypin/find-latest-tag@v1
         with:
@@ -66,7 +66,6 @@ jobs:
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           if [ "${{ github.event_name }}" == "schedule" ]; then
             if [ -f last_tag.txt ] && [ "$(cat last_tag.txt)" = "$LATEST_TAG" ]; then
               echo "skip=true" >> $GITHUB_OUTPUT
@@ -76,7 +75,6 @@ jobs:
           else
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
-
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
 
       - name: 克隆 llama.cpp
@@ -88,7 +86,7 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置 & 编译（骁龙7+ Gen2 Armv9-A 实机优化版，启用 LLAMAFILE mmap，静态链接）
+      - name: 配置编译 (极致稳定版)
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -97,29 +95,27 @@ jobs:
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-35 \
-            -DCMAKE_C_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
-            -DCMAKE_CXX_FLAGS="-march=armv9-a+nosve+dotprod+i8mm -mtune=cortex-a710" \
-            -DGGML_OPENMP=ON \
-            -DOpenMP_C_FLAGS="-fopenmp -static-openmp" \
-            -DOpenMP_CXX_FLAGS="-fopenmp -static-openmp" \
-            -DGGML_LLAMAFILE=ON \
+            -DANDROID_PLATFORM=android-28 \
+            -DCMAKE_C_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16" \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CPU_ARM_ARCH="armv8.6-a+dotprod+i8mm+fp16" \
+            -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_LTO=ON \
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DGGML_CPU_AARCH64_REPACK=ON \
-            -DGGML_ARM_I8MM=ON \
-            -DGGML_ARM_DOTPROD=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-openmp -Wl,-Bstatic -lomp -Wl,-Bdynamic" \
             -G Ninja
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
 
-      - name: 准备二进制
+      - name: 剥离调试符号并准备二进制
         if: steps.check.outputs.skip != 'true'
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
+          # 使用 Android NDK 的 strip 工具减小文件体积
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip ./llama-server
 
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
@@ -134,25 +130,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.check.outputs.latest_tag }}
-          name: llama-server Android arm64 - ${{ steps.check.outputs.latest_tag }}
+          name: llama-server Android arm64 (Stable) - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **特性**: 
-            - OpenMP 彻底静态 + AArch64 repack
-            - **适配 Armv9-A 系列 (骁龙7+ Gen2)**，指令集: armv9-a+nosve+dotprod+i8mm
-            - **启用 LLAMAFILE (mmap 加载)**，模型加载速度提升，内存占用更低
-            - C++ STL 静态链接 (c++_static)
-            **平台**: Android arm64-v8a (android-35+)
+            **极致稳定版特性**: 
+            - **无 OpenMP 依赖**，避免静态链接导致的运行时崩溃
+            - **KleidiAI 微内核优化** + **LTO 链接时优化**
+            - **C++ STL 静态链接** (c++_static)，无外部 .so 依赖
+            - 指令集: armv8.6-a+dotprod+i8mm+fp16
+            **平台**: Android arm64-v8a (API 28+)
           files: ./llama-server
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
 
-      - name: 清理旧 Releases（保留最新 5 个）
+      - name: 清理旧 Releases（保留最新 3 个）
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:][] | .tagName' | while read tag; do
+          gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:][] | .tagName' | while read tag; do
             gh release delete "$tag" --cleanup-tag --yes
           done
 
