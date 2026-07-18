@@ -20,7 +20,7 @@ env:
   BUILD_DIR: build-android
   NDK_VERSION: r27d
   ARTIFACT_NAME: "llama-server-android-arm64-stable"
-  NDK_CACHE_KEY: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}
+  # NDK_CACHE_KEY 已移除，直接在缓存步骤中使用 runner.os
 
 permissions:
   contents: write
@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
-          key: ${{ env.NDK_CACHE_KEY }}
+          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}   # 直接使用 runner.os
 
       - name: 安装 Android NDK
         if: steps.cache-ndk.outputs.cache-hit != 'true'
