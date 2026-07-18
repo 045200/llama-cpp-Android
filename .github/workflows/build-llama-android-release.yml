@@ -20,10 +20,15 @@ env:
   BUILD_DIR: build-android
   NDK_VERSION: r27d
   ARTIFACT_NAME: "llama-server-android-arm64-stable"
+  NDK_CACHE_KEY: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}
 
 permissions:
   contents: write
   actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -37,11 +42,27 @@ jobs:
       - name: 安装 Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      # 缓存 NDK 安装包，避免重复下载（约1GB）
+      - name: 缓存 Android NDK
+        id: cache-ndk
+        uses: actions/cache@v5
+        with:
+          path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
+          key: ${{ env.NDK_CACHE_KEY }}
+
       - name: 安装 Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
+
+      # 如果命中缓存，直接设置环境变量
+      - name: 设置 NDK 环境变量（命中缓存时）
+        if: steps.cache-ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: 获取最新 Tag
         id: get_tag
@@ -143,8 +164,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
 
+      # 清理旧 Releases（仅在构建成功时执行，保留最新 3 个）
       - name: 清理旧 Releases（保留最新 3 个）
-        if: always()
+        if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -152,8 +174,9 @@ jobs:
             gh release delete "$tag" --cleanup-tag --yes
           done
 
+      # 清理旧 Workflow Runs（仅在构建成功时执行，保留最新 3 条）
       - name: 清理旧 Workflow Runs（保留最新 3 条）
-        if: always()
+        if: success()
         uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
