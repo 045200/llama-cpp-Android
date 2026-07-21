@@ -1,4 +1,4 @@
-name: Build Aria2 + AriaNg (with HTTPS) Magisk Module
+name: Build Aria2 Magisk Module (Android 15+ LTO)
 on:
   push:
     branches: [ main, master ]
@@ -14,41 +14,61 @@ jobs:
       - name: 安装编译依赖
         run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool pkg-config wget unzip
 
-      - name: 设置 Android NDK
+      # ========= 1. 设置 NDK r27d =========
+      - name: 设置 Android NDK r27d
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-          unzip android-ndk-r26d-linux.zip
-          echo "ANDROID_NDK=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+          wget https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip android-ndk-r27d-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r27d" >> $GITHUB_ENV
 
-      # ========= 1. 编译 OpenSSL（静态库，供 aria2 链接） =========
-      - name: 交叉编译 OpenSSL (arm64-v8a)
+      # ========= 2. 编译 OpenSSL (静态, API 35, 启用 LTO) =========
+      - name: 交叉编译 OpenSSL (arm64-v8a, LTO)
         run: |
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
           tar -xzf openssl-1.1.1w.tar.gz
           cd openssl-1.1.1w
-          # 设置交叉编译环境
-          export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          export CC=aarch64-linux-android23-clang
+
+          export NDK=$ANDROID_NDK
+          export PATH=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+
+          # 软链接欺骗 OpenSSL Configure（NDK 无 gcc，实际是 clang）
+          ln -sf aarch64-linux-android35-clang $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-gcc
+          ln -sf aarch64-linux-android35-clang++ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-g++
+
+          export CC=aarch64-linux-android35-clang
+          export CXX=aarch64-linux-android35-clang++
           export AR=aarch64-linux-android-ar
           export RANLIB=aarch64-linux-android-ranlib
-          # 配置：编译为静态库，无测试，API 23（对应 Android 6.0+）
-          ./Configure android-arm64 -D__ANDROID_API__=23 no-shared no-tests -fPIC --prefix=$PWD/openssl-install
+
+          # 启用 LTO（-flto）和体积优化（-Os）
+          export CFLAGS="-flto -Os -fPIC"
+          export CXXFLAGS="-flto -Os -fPIC"
+          export LDFLAGS="-flto"
+
+          ./Configure android-arm64 -D__ANDROID_API__=35 no-shared no-tests -fPIC --prefix=$PWD/openssl-install
           make -j$(nproc)
           make install_sw
-          # 将安装目录暴露给后续步骤
+
           echo "OPENSSL_DIR=$PWD/openssl-install" >> $GITHUB_ENV
 
-      # ========= 2. 编译 aria2（链接 OpenSSL） =========
-      - name: 交叉编译 aria2c (arm64-v8a)
+      # ========= 3. 编译 aria2 (链接 OpenSSL, LTO) =========
+      - name: 交叉编译 aria2c (arm64-v8a, LTO)
         run: |
           git clone https://github.com/aria2/aria2.git
           cd aria2
           ./autogen.sh
-          export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+
+          export NDK=$ANDROID_NDK
+          export PATH=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           export AR=aarch64-linux-android-ar
-          export CC=aarch64-linux-android23-clang
-          export CXX=aarch64-linux-android23-clang++
-          # 启用 OpenSSL，指定路径；禁用其他可选库以减小体积
+          export CC=aarch64-linux-android35-clang
+          export CXX=aarch64-linux-android35-clang++
+
+          # LTO + 尺寸优化
+          export CFLAGS="-flto -Os"
+          export CXXFLAGS="-flto -Os"
+          export LDFLAGS="-flto"
+
           ./configure --host=aarch64-linux-android \
                       --prefix=/usr \
                       --disable-shared \
@@ -62,15 +82,18 @@ jobs:
                       --without-libz \
                       --disable-epoll
           make -j$(nproc)
+
+          # Strip 去除调试符号，进一步减小体积
+          aarch64-linux-android-strip src/aria2c
           cp src/aria2c ../aria2c_binary
 
-      # ========= 3. 下载 AriaNg =========
+      # ========= 4. 下载 AriaNg =========
       - name: 下载 AriaNg Web UI
         run: |
           wget https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip
           unzip AriaNg-1.3.7.zip -d AriaNg-dist
 
-      # ========= 4. 打包 Magisk 模块 =========
+      # ========= 5. 打包 Magisk 模块 =========
       - name: 打包 Magisk 模块
         run: |
           MODDIR=module_temp
@@ -84,11 +107,11 @@ jobs:
 
           cat > $MODDIR/module.prop <<EOF
           id=aria2_downloader
-          name=Aria2 with HTTPS + AriaNg
-          version=v1.1
-          versionCode=2
+          name=Aria2 with HTTPS + AriaNg (Android 15+ LTO)
+          version=v1.2
+          versionCode=3
           author=YourName
-          description=静态编译的 aria2，支持 HTTPS，集成 AriaNg Web 控制台（需 busybox 提供 http 服务）。
+          description=支持 HTTPS 的 aria2 下载器，集成 AriaNg Web 控制台，启用 LTO 和尺寸优化，适用于 Android 15+。
           EOF
 
           cat > $MODDIR/service.sh <<'EOF'
@@ -109,7 +132,6 @@ jobs:
           max-connection-per-server=16
           split=16
           continue=true
-          # 可选：添加 SSL 证书验证（如需）
           # check-certificate=false
           CONF
           fi
