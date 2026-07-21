@@ -1,8 +1,8 @@
-name: Build Aria2 Magisk Module
+name: Build Aria2 + AriaNg (with HTTPS) Magisk Module
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -11,90 +11,124 @@ jobs:
       - name: 拉取源码
         uses: actions/checkout@v4
 
-      # 1. 设置 Android NDK 编译环境
-      - name: 安装 NDK
+      - name: 安装编译依赖
+        run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool pkg-config wget unzip
+
+      - name: 设置 Android NDK
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
           unzip android-ndk-r26d-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-      # 2. 交叉编译 aria2 (生成 arm64-v8a 架构的二进制)
-      - name: 编译 aria2c
+      # ========= 1. 编译 OpenSSL（静态库，供 aria2 链接） =========
+      - name: 交叉编译 OpenSSL (arm64-v8a)
         run: |
-          # 下载 aria2 源码
+          wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+          tar -xzf openssl-1.1.1w.tar.gz
+          cd openssl-1.1.1w
+          # 设置交叉编译环境
+          export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export CC=aarch64-linux-android23-clang
+          export AR=aarch64-linux-android-ar
+          export RANLIB=aarch64-linux-android-ranlib
+          # 配置：编译为静态库，无测试，API 23（对应 Android 6.0+）
+          ./Configure android-arm64 -D__ANDROID_API__=23 no-shared no-tests -fPIC --prefix=$PWD/openssl-install
+          make -j$(nproc)
+          make install_sw
+          # 将安装目录暴露给后续步骤
+          echo "OPENSSL_DIR=$PWD/openssl-install" >> $GITHUB_ENV
+
+      # ========= 2. 编译 aria2（链接 OpenSSL） =========
+      - name: 交叉编译 aria2c (arm64-v8a)
+        run: |
           git clone https://github.com/aria2/aria2.git
           cd aria2
-          # 配置交叉编译工具链 (目标架构 aarch64)
+          ./autogen.sh
           export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           export AR=aarch64-linux-android-ar
           export CC=aarch64-linux-android23-clang
           export CXX=aarch64-linux-android23-clang++
-          # 生成 Makefile (静态编译，减少依赖)
+          # 启用 OpenSSL，指定路径；禁用其他可选库以减小体积
           ./configure --host=aarch64-linux-android \
                       --prefix=/usr \
                       --disable-shared \
                       --enable-static \
+                      --with-openssl=$OPENSSL_DIR \
                       --without-gnutls \
-                      --without-openssl \
                       --without-libxml2 \
                       --without-libexpat \
                       --without-sqlite3 \
-                      --without-libgmp
-          # 开始编译 (使用多核)
+                      --without-libgmp \
+                      --without-libz \
+                      --disable-epoll
           make -j$(nproc)
-          # 将编译好的二进制文件复制到根目录
           cp src/aria2c ../aria2c_binary
 
-      # 3. 组装 Magisk 模块目录
+      # ========= 3. 下载 AriaNg =========
+      - name: 下载 AriaNg Web UI
+        run: |
+          wget https://github.com/mayswind/AriaNg/releases/download/1.3.7/AriaNg-1.3.7.zip
+          unzip AriaNg-1.3.7.zip -d AriaNg-dist
+
+      # ========= 4. 打包 Magisk 模块 =========
       - name: 打包 Magisk 模块
         run: |
-          # 创建模块文件夹 (必须严格遵循Magisk结构)
-          mkdir -p module_temp/system/bin
-          mkdir -p module_temp/META-INF/com/google/android
-          
-          # ---- 放入编译好的 aria2c ----
-          cp aria2c_binary module_temp/system/bin/aria2c
-          chmod 755 module_temp/system/bin/aria2c
-          
-          # ---- 编写 module.prop (模块信息) ----
-          cat > module_temp/module.prop <<EOF
-          id=aria2_downloader
-          name=Aria2 Downloader
-          version=v1.0
-          versionCode=1
-          author=YourName
-          description=基于 aria2 的下载工具 Magisk 模块，刷入即用。
-          EOF
-          
-          # ---- 编写 service.sh (开机自启) ----
-          cat > module_temp/service.sh <<EOF
-          #!/system/bin/sh
-          # 后台启动 aria2，并指定配置路径和日志
-          /system/bin/aria2c --conf-path=/sdcard/aria2.conf -D
-          EOF
-          chmod 755 module_temp/service.sh
-          
-          # ---- 复制刷机脚本 (使用通用模板) ----
-          # 注意：此处需要一个标准的 META-INF 更新脚本，为了简洁，我会在下方用echo直接生成一个最小可用的刷机脚本
-          cat > module_temp/META-INF/com/google/android/update-binary <<'EOF'
-          #!/sbin/sh
-          # Magisk 通用刷机脚本 (简单版)
-          ui_print "正在安装 Aria2 模块..."
-          mkdir -p \$MODPATH/system/bin
-          cp -rf \$ZIPFILE/system/bin/* \$MODPATH/system/bin/
-          set_perm \$MODPATH/system/bin/aria2c 0 0 0755
-          ui_print "安装完成！"
-          EOF
-          
-          # 必须的 updater-script (虽然Magisk现在不用，但为了兼容老结构保留)
-          echo "#MAGISK" > module_temp/META-INF/com/google/android/updater-script
-          
-          # 进入目录打包成 ZIP
-          cd module_temp
-          zip -r ../Aria2-Magisk.zip ./*
+          MODDIR=module_temp
+          mkdir -p $MODDIR/system/bin
+          mkdir -p $MODDIR/system/usr/share/aria-ng
+          mkdir -p $MODDIR/data/adb/aria2
 
-      # 4. 上传最终产物
-      - name: 上传模块
+          cp aria2c_binary $MODDIR/system/bin/aria2c
+          chmod 755 $MODDIR/system/bin/aria2c
+          cp -r AriaNg-dist/* $MODDIR/system/usr/share/aria-ng/
+
+          cat > $MODDIR/module.prop <<EOF
+          id=aria2_downloader
+          name=Aria2 with HTTPS + AriaNg
+          version=v1.1
+          versionCode=2
+          author=YourName
+          description=静态编译的 aria2，支持 HTTPS，集成 AriaNg Web 控制台（需 busybox 提供 http 服务）。
+          EOF
+
+          cat > $MODDIR/service.sh <<'EOF'
+          #!/system/bin/sh
+          sleep 10
+          mkdir -p /data/adb/aria2
+          if [ ! -f /data/adb/aria2/aria2.conf ]; then
+            cat > /data/adb/aria2/aria2.conf <<CONF
+          enable-rpc=true
+          rpc-allow-origin-all=true
+          rpc-listen-all=true
+          rpc-listen-port=6800
+          # rpc-secret=YourSecretToken
+          dir=/sdcard/Download
+          log=/data/adb/aria2/aria2.log
+          log-level=notice
+          max-concurrent-downloads=5
+          max-connection-per-server=16
+          split=16
+          continue=true
+          # 可选：添加 SSL 证书验证（如需）
+          # check-certificate=false
+          CONF
+          fi
+          /system/bin/aria2c --conf-path=/data/adb/aria2/aria2.conf -D
+          if command -v busybox >/dev/null 2>&1; then
+            busybox killall busybox httpd 2>/dev/null
+            busybox httpd -p 8080 -h /system/usr/share/aria-ng -f &
+            echo "AriaNg 已启动: http://127.0.0.1:8080"
+          else
+            echo "警告: 未找到 busybox，请安装 busybox 模块以使用 Web 界面。"
+          fi
+          EOF
+          chmod 755 $MODDIR/service.sh
+
+          cd $MODDIR
+          zip -r ../Aria2-Magisk.zip ./*
+          cd ..
+
+      - name: 上传工件
         uses: actions/upload-artifact@v4
         with:
           name: Aria2-Magisk-Module
