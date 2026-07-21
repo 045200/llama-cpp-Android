@@ -21,7 +21,7 @@ jobs:
           unzip android-ndk-r27d-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r27d" >> $GITHUB_ENV
 
-      # ========= 2. 编译 OpenSSL (静态, API 35, 启用 LTO) =========
+      # ========= 2. 编译 OpenSSL（静态，API 35，LTO） =========
       - name: 交叉编译 OpenSSL (arm64-v8a, LTO)
         run: |
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
@@ -29,29 +29,36 @@ jobs:
           cd openssl-1.1.1w
 
           export NDK=$ANDROID_NDK
-          export PATH=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
 
-          # 软链接欺骗 OpenSSL Configure（NDK 无 gcc，实际是 clang）
-          ln -sf aarch64-linux-android35-clang $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-gcc
-          ln -sf aarch64-linux-android35-clang++ $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-g++
-
+          # 设置编译器（使用带 API 的 clang）
           export CC=aarch64-linux-android35-clang
           export CXX=aarch64-linux-android35-clang++
           export AR=aarch64-linux-android-ar
           export RANLIB=aarch64-linux-android-ranlib
 
-          # 启用 LTO（-flto）和体积优化（-Os）
-          export CFLAGS="-flto -Os -fPIC"
-          export CXXFLAGS="-flto -Os -fPIC"
+          # 关键：设置 CROSS_COMPILE 前缀，让 Configure 知道交叉编译工具链前缀（免去对 gcc 的查找）
+          export CROSS_COMPILE=aarch64-linux-android-
+
+          # 优化标志
+          export CFLAGS="-flto -Os -fPIC -D__ANDROID_API__=35"
+          export CXXFLAGS="-flto -Os -fPIC -D__ANDROID_API__=35"
           export LDFLAGS="-flto"
 
-          ./Configure android-arm64 -D__ANDROID_API__=35 no-shared no-tests -fPIC --prefix=$PWD/openssl-install
+          # 注意：这里不传递 --host，而是直接使用 Configure 的 android-arm64 目标，并指定 CC 等
+          ./Configure android-arm64 \
+                       -D__ANDROID_API__=35 \
+                       no-shared no-tests \
+                       -fPIC \
+                       --prefix=$PWD/openssl-install
+
           make -j$(nproc)
           make install_sw
 
           echo "OPENSSL_DIR=$PWD/openssl-install" >> $GITHUB_ENV
 
-      # ========= 3. 编译 aria2 (链接 OpenSSL, LTO) =========
+      # ========= 3. 编译 aria2（链接 OpenSSL，LTO） =========
       - name: 交叉编译 aria2c (arm64-v8a, LTO)
         run: |
           git clone https://github.com/aria2/aria2.git
@@ -59,12 +66,11 @@ jobs:
           ./autogen.sh
 
           export NDK=$ANDROID_NDK
-          export PATH=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
           export AR=aarch64-linux-android-ar
           export CC=aarch64-linux-android35-clang
           export CXX=aarch64-linux-android35-clang++
-
-          # LTO + 尺寸优化
           export CFLAGS="-flto -Os"
           export CXXFLAGS="-flto -Os"
           export LDFLAGS="-flto"
@@ -83,7 +89,7 @@ jobs:
                       --disable-epoll
           make -j$(nproc)
 
-          # Strip 去除调试符号，进一步减小体积
+          # 剥离符号
           aarch64-linux-android-strip src/aria2c
           cp src/aria2c ../aria2c_binary
 
@@ -108,8 +114,8 @@ jobs:
           cat > $MODDIR/module.prop <<EOF
           id=aria2_downloader
           name=Aria2 with HTTPS + AriaNg (Android 15+ LTO)
-          version=v1.2
-          versionCode=3
+          version=v1.3
+          versionCode=4
           author=YourName
           description=支持 HTTPS 的 aria2 下载器，集成 AriaNg Web 控制台，启用 LTO 和尺寸优化，适用于 Android 15+。
           EOF
