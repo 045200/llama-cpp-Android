@@ -1,0 +1,101 @@
+name: Build Aria2 Magisk Module
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取源码
+        uses: actions/checkout@v4
+
+      # 1. 设置 Android NDK 编译环境
+      - name: 安装 NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip android-ndk-r26d-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+
+      # 2. 交叉编译 aria2 (生成 arm64-v8a 架构的二进制)
+      - name: 编译 aria2c
+        run: |
+          # 下载 aria2 源码
+          git clone https://github.com/aria2/aria2.git
+          cd aria2
+          # 配置交叉编译工具链 (目标架构 aarch64)
+          export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export AR=aarch64-linux-android-ar
+          export CC=aarch64-linux-android23-clang
+          export CXX=aarch64-linux-android23-clang++
+          # 生成 Makefile (静态编译，减少依赖)
+          ./configure --host=aarch64-linux-android \
+                      --prefix=/usr \
+                      --disable-shared \
+                      --enable-static \
+                      --without-gnutls \
+                      --without-openssl \
+                      --without-libxml2 \
+                      --without-libexpat \
+                      --without-sqlite3 \
+                      --without-libgmp
+          # 开始编译 (使用多核)
+          make -j$(nproc)
+          # 将编译好的二进制文件复制到根目录
+          cp src/aria2c ../aria2c_binary
+
+      # 3. 组装 Magisk 模块目录
+      - name: 打包 Magisk 模块
+        run: |
+          # 创建模块文件夹 (必须严格遵循Magisk结构)
+          mkdir -p module_temp/system/bin
+          mkdir -p module_temp/META-INF/com/google/android
+          
+          # ---- 放入编译好的 aria2c ----
+          cp aria2c_binary module_temp/system/bin/aria2c
+          chmod 755 module_temp/system/bin/aria2c
+          
+          # ---- 编写 module.prop (模块信息) ----
+          cat > module_temp/module.prop <<EOF
+          id=aria2_downloader
+          name=Aria2 Downloader
+          version=v1.0
+          versionCode=1
+          author=YourName
+          description=基于 aria2 的下载工具 Magisk 模块，刷入即用。
+          EOF
+          
+          # ---- 编写 service.sh (开机自启) ----
+          cat > module_temp/service.sh <<EOF
+          #!/system/bin/sh
+          # 后台启动 aria2，并指定配置路径和日志
+          /system/bin/aria2c --conf-path=/sdcard/aria2.conf -D
+          EOF
+          chmod 755 module_temp/service.sh
+          
+          # ---- 复制刷机脚本 (使用通用模板) ----
+          # 注意：此处需要一个标准的 META-INF 更新脚本，为了简洁，我会在下方用echo直接生成一个最小可用的刷机脚本
+          cat > module_temp/META-INF/com/google/android/update-binary <<'EOF'
+          #!/sbin/sh
+          # Magisk 通用刷机脚本 (简单版)
+          ui_print "正在安装 Aria2 模块..."
+          mkdir -p \$MODPATH/system/bin
+          cp -rf \$ZIPFILE/system/bin/* \$MODPATH/system/bin/
+          set_perm \$MODPATH/system/bin/aria2c 0 0 0755
+          ui_print "安装完成！"
+          EOF
+          
+          # 必须的 updater-script (虽然Magisk现在不用，但为了兼容老结构保留)
+          echo "#MAGISK" > module_temp/META-INF/com/google/android/updater-script
+          
+          # 进入目录打包成 ZIP
+          cd module_temp
+          zip -r ../Aria2-Magisk.zip ./*
+
+      # 4. 上传最终产物
+      - name: 上传模块
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aria2-Magisk-Module
+          path: Aria2-Magisk.zip
