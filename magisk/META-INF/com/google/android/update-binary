@@ -1,11 +1,9 @@
 #!/system/bin/sh
 # Magisk 模块安装脚本
-# 此脚本在 Magisk 刷入时执行
 
 ui_print "****************************************"
-ui_print "    llama-server 安装器"
+ui_print "    llama-server 安装器 (含延迟自启)"
 ui_print "    版本: $(grep version $MODPATH/module.prop | cut -d= -f2)"
-ui_print "    架构: arm64-v8a (ARMv8.6-A)"
 ui_print "****************************************"
 
 # 统一安装目录
@@ -13,13 +11,18 @@ TARGET_DIR="/data/llama"
 
 ui_print "-> 创建目录: $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
-mkdir -p "$TARGET_DIR/models"      # 模型存放目录
+mkdir -p "$TARGET_DIR/models"
 
 ui_print "-> 安装 llama-server"
 cp -f "$MODPATH/llama-server" "$TARGET_DIR/"
 chmod 755 "$TARGET_DIR/llama-server"
 
-# 创建 system/bin 软链脚本（使 llama-server 命令全局可用）
+# 安装 service.sh（自启脚本）
+ui_print "-> 安装延迟自启脚本 (service.sh)"
+cp -f "$MODPATH/service.sh" "$MODPATH/service.sh"
+chmod 755 "$MODPATH/service.sh"
+
+# 创建 system/bin 软链脚本
 mkdir -p "$MODPATH/system/bin"
 cat > "$MODPATH/system/bin/llama-server" << 'EOF'
 #!/system/bin/sh
@@ -28,8 +31,8 @@ EOF
 chmod 755 "$MODPATH/system/bin/llama-server"
 
 ui_print "-> 安装完成!"
-ui_print "   二进制路径: /data/llama/llama-server"
-ui_print "   模型存放:   /data/llama/models/"
-ui_print "   用法示例:   llama-server -m /data/llama/models/your_model.gguf"
-ui_print "   提示:       建议加 -c 2048 限制上下文"
+ui_print "   二进制: /data/llama/llama-server"
+ui_print "   模型存放: /data/llama/models/"
+ui_print "   开机延迟 60 秒自启 (service.sh)"
+ui_print "   日志: /data/llama/llama.log"
 ui_print "****************************************"
