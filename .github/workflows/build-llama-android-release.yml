@@ -34,6 +34,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 显式 checkout 当前仓库（包含 magisk/ 框架）
+      - name: Checkout 当前仓库
+        uses: actions/checkout@v6
+        with:
+          path: current_repo
+
       - name: 生成仓库唯一标识（用于缓存隔离）
         id: repo_key
         run: |
@@ -167,14 +173,14 @@ jobs:
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug ./llama-server
 
       # ============================================================
-      # 构建 Magisk 模块 —— 直接使用仓库根目录的 magisk/ 文件夹
+      # 构建 Magisk 模块 —— 使用 current_repo/magisk/ 框架
       # ============================================================
-      - name: 构建 Magisk 模块（使用仓库中的 magisk 框架）
+      - name: 构建 Magisk 模块
         if: steps.check.outputs.skip != 'true' && success()
         run: |
-          # 检查仓库根目录是否有 magisk 文件夹
-          if [ ! -d "magisk" ]; then
-            echo "错误: 仓库根目录缺少 magisk/ 文件夹，请创建并放入模块模板"
+          MAGISK_SRC="${{ github.workspace }}/current_repo/magisk"
+          if [ ! -d "$MAGISK_SRC" ]; then
+            echo "错误: 仓库根目录缺少 magisk/ 文件夹（检查路径: $MAGISK_SRC）"
             exit 1
           fi
 
@@ -182,19 +188,19 @@ jobs:
           mkdir -p "$MODULE_DIR"
 
           # 复制用户自定义的 magisk 框架所有内容
-          cp -r magisk/* "$MODULE_DIR/"
+          cp -r "$MAGISK_SRC"/* "$MODULE_DIR/"
 
-          # 用编译好的二进制替换占位文件（如果有同名则覆盖）
+          # 用编译好的二进制替换占位文件
           cp ./llama-server "$MODULE_DIR/"
           chmod 755 "$MODULE_DIR/llama-server"
 
-          # 自动更新 module.prop 中的版本信息
+          # 自动更新 module.prop 版本信息
           if [ -f "$MODULE_DIR/module.prop" ]; then
             sed -i "s/^version=.*/version=${{ steps.check.outputs.latest_tag }}/" "$MODULE_DIR/module.prop"
             sed -i "s/^versionCode=.*/versionCode=$(date +%Y%m%d%H%M)/" "$MODULE_DIR/module.prop"
           fi
 
-          # 确保所有脚本都有执行权限
+          # 赋予所有脚本执行权限
           find "$MODULE_DIR" -name "*.sh" -exec chmod 755 {} \;
           chmod 755 "$MODULE_DIR/system/bin/llama-server" 2>/dev/null || true
 
@@ -203,7 +209,7 @@ jobs:
           zip -r9 "../${{ env.MODULE_NAME }}.zip" ./*
           cd ..
 
-          # 生成校验码
+          # 生成 SHA256 校验码
           sha256sum "${{ env.MODULE_NAME }}.zip" > "${{ env.MODULE_NAME }}.zip.sha256"
 
       - name: 上传 Magisk 模块 Artifact
