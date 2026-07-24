@@ -1,0 +1,6 @@
+id=llama-server
+name=llama-server
+version=自定义版本号（如 b2784）
+versionCode=20260724
+author=你的名字
+description=ARMv8.6-a+dotprod+i8mm+fp16 优化, 静态链接, 骁龙7Gen2/8Gen2专用
