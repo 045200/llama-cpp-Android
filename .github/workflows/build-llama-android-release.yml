@@ -20,7 +20,6 @@ env:
   BUILD_DIR: build-android
   NDK_VERSION: r27d
   ARTIFACT_NAME: "llama-server-android-arm64-stable"
-  # NDK_CACHE_KEY 已移除，直接在缓存步骤中使用 runner.os
 
 permissions:
   contents: write
@@ -34,21 +33,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: 生成仓库唯一标识（用于缓存隔离）
+        id: repo_key
+        run: |
+          REPO="${{ env.REPO }}"
+          echo "key=${REPO//\//_}" >> $GITHUB_OUTPUT
+
       - name: 安装 CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.27.x'
 
       - name: 安装 Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
 
-      # 缓存 NDK 安装包，避免重复下载（约1GB）
       - name: 缓存 Android NDK
         id: cache-ndk
         uses: actions/cache@v5
         with:
           path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
-          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}   # 直接使用 runner.os
+          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}
 
       - name: 安装 Android NDK
         if: steps.cache-ndk.outputs.cache-hit != 'true'
@@ -56,8 +62,8 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
+          local-cache: true
 
-      # 如果命中缓存，直接设置环境变量
       - name: 设置 NDK 环境变量（命中缓存时）
         if: steps.cache-ndk.outputs.cache-hit == 'true'
         run: |
@@ -77,7 +83,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: last_tag.txt
-          key: last-tag-${{ env.REPO }}
+          key: last-tag-${{ steps.repo_key.outputs.key }}
 
       - name: 判断是否需要构建
         id: check
@@ -107,7 +113,7 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置编译 (极致稳定版)
+      - name: 配置编译（极致稳定 + 防 OOM）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -117,8 +123,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
-            -DCMAKE_C_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16" \
+            -DCMAKE_C_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory -Wl,--reduce-memory-overheads" \
             -DGGML_OPENMP=OFF \
             -DGGML_CPU_ARM_ARCH="armv8.6-a+dotprod+i8mm+fp16" \
             -DGGML_CPU_KLEIDIAI=ON \
@@ -128,53 +135,87 @@ jobs:
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -G Ninja
-          cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(nproc)
+          # 限制并行链接，防止内存溢出（GitHub runner 内存约7GB）
+          cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(( $(nproc) / 2 + 1 ))
+
+      - name: 捕获构建错误日志（仅失败时）
+        if: failure() && steps.check.outputs.skip != 'true'
+        working-directory: llama.cpp
+        run: |
+          if [ -f ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log ]; then
+            cp ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log ./cmake_error.log
+          fi
+          if [ -f ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ]; then
+            cp ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ./cmake_output.log
+          fi
+          # 上传失败日志作为 artifact（手动处理，因为后续 steps 不会执行）
+          # 但这里无法自动上传，我们可以用 actions/upload-artifact 在单独的 step 中处理
+          # 但我们可以在当前 step 中保存文件到工作区，让后续的失败步骤上传
+          mkdir -p ../build-logs
+          cp *.log ../build-logs/ || true
+
+      - name: 上传构建失败日志（如有）
+        if: failure() && steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-failure-logs
+          path: build-logs/
+          retention-days: 7
 
       - name: 剥离调试符号并准备二进制
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.skip != 'true' && success()
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
-          # 使用 Android NDK 的 strip 工具减小文件体积
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip ./llama-server
+          # 保留符号表用于 addr2line，只删除调试信息（--strip-debug）
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug ./llama-server
+          # 生成 SHA256 校验码
+          sha256sum ./llama-server > ./llama-server.sha256
 
       - name: 上传 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ./llama-server
+          path: |
+            ./llama-server
+            ./llama-server.sha256
           retention-days: 15
 
       - name: 发布 Release
         if: steps.check.outputs.skip != 'true' && success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.latest_tag }}
+          tag_name: android-${{ steps.check.outputs.latest_tag }}
           name: llama-server Android arm64 (Stable) - ${{ steps.check.outputs.latest_tag }}
           body: |
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **极致稳定版特性**: 
+            **极致稳定版特性**:
             - **无 OpenMP 依赖**，避免静态链接导致的运行时崩溃
             - **KleidiAI 微内核优化** + **LTO 链接时优化**
             - **C++ STL 静态链接** (c++_static)，无外部 .so 依赖
             - 指令集: armv8.6-a+dotprod+i8mm+fp16
+            - **深度适配高通骁龙 7 Gen 2 / 8 Gen 2**（ARM v9 架构），**不兼容骁龙 888 及更早芯片**
             **平台**: Android arm64-v8a (API 28+)
-          files: ./llama-server
+            **SHA256**: `$(cat ./llama-server.sha256 | awk '{print $1}')`
+            **使用建议**: 建议在 Termux 或 ADB 环境下运行，注意 `chmod +x` 并给予执行权限。
+          files: |
+            ./llama-server
+            ./llama-server.sha256
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
 
-      # 清理旧 Releases（仅在构建成功时执行，保留最新 3 个）
-      - name: 清理旧 Releases（保留最新 3 个）
+      - name: 清理旧 Releases（保留最新 3 个 android-* 前缀）
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:][] | .tagName' | while read tag; do
-            gh release delete "$tag" --cleanup-tag --yes
+            if [[ "$tag" == android-* ]]; then
+              gh release delete "$tag" --cleanup-tag --yes
+            fi
           done
 
-      # 清理旧 Workflow Runs（仅在构建成功时执行，保留最新 3 条）
       - name: 清理旧 Workflow Runs（保留最新 3 条）
         if: success()
         uses: Mattraks/delete-workflow-runs@v2
@@ -193,4 +234,4 @@ jobs:
         uses: actions/cache@v5
         with:
           path: last_tag.txt
-          key: last-tag-${{ env.REPO }}
+          key: last-tag-${{ steps.repo_key.outputs.key }}
