@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (Stable)
+name: Build Android Native arm64 llama-server (Magisk Module with Delay Auto-start)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,8 @@ env:
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
-  ARTIFACT_NAME: "llama-server-android-arm64-stable"
+  MODULE_NAME: "llama-server-magisk"
+  ARTIFACT_NAME: "llama-server-android-arm64-magisk"
 
 permissions:
   contents: write
@@ -135,7 +136,6 @@ jobs:
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -G Ninja
-          # 限制并行链接，防止内存溢出（GitHub runner 内存约7GB）
           cmake --build . --config "${{ env.BUILD_TYPE }}" -j $(( $(nproc) / 2 + 1 ))
 
       - name: 捕获构建错误日志（仅失败时）
@@ -148,9 +148,6 @@ jobs:
           if [ -f ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ]; then
             cp ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ./cmake_output.log
           fi
-          # 上传失败日志作为 artifact（手动处理，因为后续 steps 不会执行）
-          # 但这里无法自动上传，我们可以用 actions/upload-artifact 在单独的 step 中处理
-          # 但我们可以在当前 step 中保存文件到工作区，让后续的失败步骤上传
           mkdir -p ../build-logs
           cp *.log ../build-logs/ || true
 
@@ -167,19 +164,56 @@ jobs:
         run: |
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
-          # 保留符号表用于 addr2line，只删除调试信息（--strip-debug）
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug ./llama-server
-          # 生成 SHA256 校验码
-          sha256sum ./llama-server > ./llama-server.sha256
 
-      - name: 上传 Artifact
+      # ============================================================
+      # 构建 Magisk 模块 —— 直接使用仓库根目录的 magisk/ 文件夹
+      # ============================================================
+      - name: 构建 Magisk 模块（使用仓库中的 magisk 框架）
+        if: steps.check.outputs.skip != 'true' && success()
+        run: |
+          # 检查仓库根目录是否有 magisk 文件夹
+          if [ ! -d "magisk" ]; then
+            echo "错误: 仓库根目录缺少 magisk/ 文件夹，请创建并放入模块模板"
+            exit 1
+          fi
+
+          MODULE_DIR="${{ env.MODULE_NAME }}"
+          mkdir -p "$MODULE_DIR"
+
+          # 复制用户自定义的 magisk 框架所有内容
+          cp -r magisk/* "$MODULE_DIR/"
+
+          # 用编译好的二进制替换占位文件（如果有同名则覆盖）
+          cp ./llama-server "$MODULE_DIR/"
+          chmod 755 "$MODULE_DIR/llama-server"
+
+          # 自动更新 module.prop 中的版本信息
+          if [ -f "$MODULE_DIR/module.prop" ]; then
+            sed -i "s/^version=.*/version=${{ steps.check.outputs.latest_tag }}/" "$MODULE_DIR/module.prop"
+            sed -i "s/^versionCode=.*/versionCode=$(date +%Y%m%d%H%M)/" "$MODULE_DIR/module.prop"
+          fi
+
+          # 确保所有脚本都有执行权限
+          find "$MODULE_DIR" -name "*.sh" -exec chmod 755 {} \;
+          chmod 755 "$MODULE_DIR/system/bin/llama-server" 2>/dev/null || true
+
+          # 打包为 Magisk 模块 ZIP
+          cd "$MODULE_DIR"
+          zip -r9 "../${{ env.MODULE_NAME }}.zip" ./*
+          cd ..
+
+          # 生成校验码
+          sha256sum "${{ env.MODULE_NAME }}.zip" > "${{ env.MODULE_NAME }}.zip.sha256"
+
+      - name: 上传 Magisk 模块 Artifact
         if: steps.check.outputs.skip != 'true' && success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: |
-            ./llama-server
-            ./llama-server.sha256
+            ${{ env.MODULE_NAME }}.zip
+            ${{ env.MODULE_NAME }}.zip.sha256
           retention-days: 15
 
       - name: 发布 Release
@@ -187,21 +221,54 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-${{ steps.check.outputs.latest_tag }}
-          name: llama-server Android arm64 (Stable) - ${{ steps.check.outputs.latest_tag }}
+          name: llama-server Magisk Module (延迟自启) - ${{ steps.check.outputs.latest_tag }}
           body: |
+            ## 🚀 Magisk 模块发布 — 含开机延迟自启
+            
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            **极致稳定版特性**:
+            
+            ### 📦 安装方式
+            1. 下载 `${{ env.MODULE_NAME }}.zip`
+            2. 在 Magisk Manager 中刷入模块
+            3. 重启设备
+            4. **开机后等待 60 秒**，服务自动启动
+            5. 将 `.gguf` 模型放入 `/data/llama/models/` 目录
+            
+            ### ⚙️ 技术特性
             - **无 OpenMP 依赖**，避免静态链接导致的运行时崩溃
             - **KleidiAI 微内核优化** + **LTO 链接时优化**
             - **C++ STL 静态链接** (c++_static)，无外部 .so 依赖
             - 指令集: armv8.6-a+dotprod+i8mm+fp16
-            - **深度适配高通骁龙 7 Gen 2 / 8 Gen 2**（ARM v9 架构），**不兼容骁龙 888 及更早芯片**
-            **平台**: Android arm64-v8a (API 28+)
-            **SHA256**: `$(cat ./llama-server.sha256 | awk '{print $1}')`
-            **使用建议**: 建议在 Termux 或 ADB 环境下运行，注意 `chmod +x` 并给予执行权限。
+            - **深度适配高通骁龙 7 Gen 2 / 8 Gen 2**
+            - **开机延迟 60 秒自启** (等待系统 IO 完成)
+            - **OOM 优先级保护** (oom_score_adj=-1000，防止被系统强杀)
+            
+            ### 📱 平台要求
+            - Android arm64-v8a (API 28+)
+            - Magisk 24.0+
+            
+            ### 🔧 文件安装位置
+            | 项目 | 路径 |
+            |------|------|
+            | 二进制 | `/data/llama/llama-server` |
+            | 模型目录 | `/data/llama/models/` |
+            | 全局命令 | `llama-server` (已加入 PATH) |
+            | 自启脚本 | `/data/adb/modules/llama-server/service.sh` |
+            | 运行日志 | `/data/llama/llama.log` |
+            
+            ### 💡 手动重启服务（无需重启手机）
+            ```bash
+            pkill llama-server
+            sh /data/adb/modules/llama-server/service.sh
+            ```
+            
+            ### 🔗 与 Rust 程序配合使用
+            API 地址: `http://127.0.0.1:8080`
+            
+            **SHA256**: `$(cat ${{ env.MODULE_NAME }}.zip.sha256 | awk '{print $1}')`
           files: |
-            ./llama-server
-            ./llama-server.sha256
+            ${{ env.MODULE_NAME }}.zip
+            ${{ env.MODULE_NAME }}.zip.sha256
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false
 
