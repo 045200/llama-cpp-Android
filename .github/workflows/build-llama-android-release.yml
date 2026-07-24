@@ -114,7 +114,7 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置编译（极致稳定 + 防 OOM）
+      - name: 配置编译（极致稳定 + 防 OOM，移除不兼容链接参数）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
@@ -126,7 +126,7 @@ jobs:
             -DANDROID_PLATFORM=android-28 \
             -DCMAKE_C_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
             -DCMAKE_CXX_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory -Wl,--reduce-memory-overheads" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" \
             -DGGML_OPENMP=OFF \
             -DGGML_CPU_ARM_ARCH="armv8.6-a+dotprod+i8mm+fp16" \
             -DGGML_CPU_KLEIDIAI=ON \
