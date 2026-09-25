@@ -19,6 +19,7 @@ env:
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
   NDK_VERSION: r27d
+  NDK_ROOT_PATH: /usr/local/lib/android/sdk/ndk/r27d
   MODULE_NAME: "llama-server-magisk"
   ARTIFACT_NAME: "llama-server-android-arm64-magisk"
 
@@ -55,29 +56,74 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build
+          echo "=== Ninja 版本 ==="
+          ninja --version
 
+      # ============================================================
+      # NDK 缓存 + 校验 + 按需重装
+      # ============================================================
       - name: 缓存 Android NDK
         id: cache-ndk
         uses: actions/cache@v5
         with:
-          path: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
-          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}
+          path: ${{ env.NDK_ROOT_PATH }}
+          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}-v2
 
-      - name: 安装 Android NDK
-        if: steps.cache-ndk.outputs.cache-hit != 'true'
+      - name: 校验 NDK 缓存有效性
+        id: verify-ndk
+        run: |
+          TC="${{ env.NDK_ROOT_PATH }}/build/cmake/android.toolchain.cmake"
+          if [ -f "$TC" ]; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+            echo "✓ NDK 缓存有效: $TC"
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "✗ NDK 缓存无效或缺失"
+            echo "--- 当前目录内容 ---"
+            ls -la "${{ env.NDK_ROOT_PATH }}" 2>/dev/null || echo "(目录不存在)"
+          fi
+
+      - name: 清理损坏的 NDK 残目录
+        if: steps.verify-ndk.outputs.valid != 'true'
+        run: |
+          rm -rf "${{ env.NDK_ROOT_PATH }}"
+          echo "已清理: ${{ env.NDK_ROOT_PATH }}"
+
+      - name: 安装 Android NDK（缓存缺失/损坏时）
+        if: steps.verify-ndk.outputs.valid != 'true'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
-          add-to-path: false
           local-cache: true
 
-      - name: 设置 NDK 环境变量
+      - name: 配置 NDK 环境变量并最终验证
         run: |
-          NDK_ROOT="/usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}"
-          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
-          echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          TC="${{ env.NDK_ROOT_PATH }}/build/cmake/android.toolchain.cmake"
+          if [ ! -f "$TC" ]; then
+            echo "✗ 致命错误: 未找到 toolchain 文件: $TC"
+            echo "--- 实际 NDK 目录 ---"
+            ls -la /usr/local/lib/android/sdk/ndk/ || true
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=${{ env.NDK_ROOT_PATH }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${{ env.NDK_ROOT_PATH }}" >> $GITHUB_ENV
+          echo "${{ env.NDK_ROOT_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          echo "✓ NDK 已就绪: ${{ env.NDK_ROOT_PATH }}"
 
+      - name: 构建工具综合校验
+        run: |
+          echo "=== 构建环境检查 ==="
+          echo "CMake : $(cmake --version | head -n1)"
+          echo "Ninja : $(ninja --version)"
+          echo "NDK   : $ANDROID_NDK_HOME"
+          echo "编译器: $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "✗ clang 未找到"; exit 1; }
+          echo "✓ 所有构建工具就绪"
+
+      # ============================================================
+      # 上游版本检测
+      # ============================================================
       - name: 获取最新 Tag
         id: get_tag
         uses: oprypin/find-latest-tag@v1
@@ -121,7 +167,10 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置编译（Redmi Note 12 Turbo / 骁龙 7+ Gen 2 专属优化）
+      # ============================================================
+      # 编译 —— Redmi Note 12 Turbo / 骁龙 7+ Gen 2 专属优化
+      # ============================================================
+      - name: 配置编译（骁龙 7+ Gen 2 专属优化）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
