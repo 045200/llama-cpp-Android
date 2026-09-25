@@ -1,4 +1,4 @@
-name: Build Android Native arm64 llama-server (Magisk Module with Delay Auto-start)
+name: Build Android Native arm64 llama-server (Magisk Module - Manual Control)
 
 on:
   workflow_dispatch:
@@ -71,11 +71,12 @@ jobs:
           add-to-path: false
           local-cache: true
 
-      - name: 设置 NDK 环境变量（命中缓存时）
-        if: steps.cache-ndk.outputs.cache-hit == 'true'
+      - name: 设置 NDK 环境变量
         run: |
-          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          NDK_ROOT="/usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: 获取最新 Tag
         id: get_tag
@@ -120,25 +121,31 @@ jobs:
           path: llama.cpp
           fetch-depth: 1
 
-      - name: 配置编译（极致稳定 + 防 OOM，移除不兼容链接参数）
+      - name: 配置编译（Redmi Note 12 Turbo / 骁龙 7+ Gen 2 专属优化）
         if: steps.check.outputs.skip != 'true'
         working-directory: llama.cpp
         run: |
           mkdir -p ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
+          # 说明：
+          #   骁龙 7+ Gen 2 = 1× Cortex-X2 + 3× Cortex-A710 + 4× Cortex-A510
+          #   全核支持 armv8.6-a + dotprod + i8mm + fp16 + bf16
+          #   -march 统一由 GGML_CPU_ARM_ARCH 注入，避免重复
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-28 \
-            -DCMAKE_C_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
-            -DCMAKE_CXX_FLAGS="-march=armv8.6-a+dotprod+i8mm+fp16 -O3" \
+            -DCMAKE_C_FLAGS="-O3" \
+            -DCMAKE_CXX_FLAGS="-O3" \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,--no-keep-memory" \
             -DGGML_OPENMP=OFF \
-            -DGGML_CPU_ARM_ARCH="armv8.6-a+dotprod+i8mm+fp16" \
+            -DGGML_CPU_ARM_ARCH="armv8.6-a+dotprod+i8mm+fp16+bf16" \
             -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_LLAMAFILE=ON \
             -DGGML_LTO=ON \
             -DBUILD_SHARED_LIBS=OFF \
             -DANDROID_STL=c++_static \
+            -DANDROID_ARM_NEON=ON \
             -DGGML_BLAS=OFF \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -G Ninja
@@ -146,16 +153,12 @@ jobs:
 
       - name: 捕获构建错误日志（仅失败时）
         if: failure() && steps.check.outputs.skip != 'true'
-        working-directory: llama.cpp
         run: |
-          if [ -f ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log ]; then
-            cp ${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log ./cmake_error.log
-          fi
-          if [ -f ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ]; then
-            cp ${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log ./cmake_output.log
-          fi
-          mkdir -p ../build-logs
-          cp *.log ../build-logs/ || true
+          mkdir -p build-logs
+          cp llama.cpp/${{ env.BUILD_DIR }}/CMakeFiles/CMakeError.log  build-logs/ 2>/dev/null || true
+          cp llama.cpp/${{ env.BUILD_DIR }}/CMakeFiles/CMakeOutput.log build-logs/ 2>/dev/null || true
+          cp llama.cpp/${{ env.BUILD_DIR }}/.ninja_log                 build-logs/ 2>/dev/null || true
+          ls -la build-logs/
 
       - name: 上传构建失败日志（如有）
         if: failure() && steps.check.outputs.skip != 'true'
@@ -163,6 +166,7 @@ jobs:
         with:
           name: build-failure-logs
           path: build-logs/
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: 剥离调试符号并准备二进制
@@ -171,6 +175,8 @@ jobs:
           cp llama.cpp/${{ env.BUILD_DIR }}/bin/llama-server ./llama-server
           chmod +x ./llama-server
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug ./llama-server
+          echo "二进制大小:"
+          ls -lh ./llama-server
 
       # ============================================================
       # 构建 Magisk 模块 —— 使用 current_repo/magisk/ 框架
@@ -227,50 +233,77 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-${{ steps.check.outputs.latest_tag }}
-          name: llama-server Magisk Module (延迟自启) - ${{ steps.check.outputs.latest_tag }}
+          name: llama-server Magisk Module (手动启停) - ${{ steps.check.outputs.latest_tag }}
           body: |
-            ## 🚀 Magisk 模块发布 — 含开机延迟自启
-            
+            ## 🚀 Magisk 模块发布 — 手动启停版（Redmi Note 12 Turbo 优化）
+
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
-            
+
             ### 📦 安装方式
             1. 下载 `${{ env.MODULE_NAME }}.zip`
             2. 在 Magisk Manager 中刷入模块
             3. 重启设备
-            4. **开机后等待 60 秒**，服务自动启动
-            5. 将 `.gguf` 模型放入 `/data/llama/models/` 目录
-            
+            4. 将 `.gguf` 模型放入 `/data/llama/models/` 目录
+            5. **打开 Magisk → 模块 → llama-server → 点击「运行」按钮**
+            6. 弹窗提示后：
+               - **音量上键** → 启动 / 停止服务
+               - **音量下键** → 取消退出
+
+            ### 🎮 手动控制说明
+            本模块**不再开机自动启动**，改为通过 Magisk 模块的「运行」按钮手动控制。
+            每次点击「运行」按钮，脚本会检测服务当前状态：
+
+            | 当前状态 | 按音量上 | 按音量下 |
+            |---------|---------|---------|
+            | 未运行  | 启动服务 | 退出    |
+            | 运行中  | 停止服务 | 退出    |
+
+            等待按键最长 30 秒，超时自动退出，不执行任何操作。
+
             ### ⚙️ 技术特性
             - **无 OpenMP 依赖**，避免静态链接导致的运行时崩溃
-            - **KleidiAI 微内核优化** + **LTO 链接时优化**
+            - **KleidiAI 微内核优化** + **llamafile SGEMM** + **LTO 链接时优化**
             - **C++ STL 静态链接** (c++_static)，无外部 .so 依赖
-            - 指令集: armv8.6-a+dotprod+i8mm+fp16
-            - **深度适配高通骁龙 7 Gen 2 / 8 Gen 2**
-            - **开机延迟 60 秒自启** (等待系统 IO 完成)
+            - **指令集**: `armv8.6-a+dotprod+i8mm+fp16+bf16`
+            - **深度适配 Redmi Note 12 Turbo（骁龙 7+ Gen 2）**
+              - 1× Cortex-X2 + 3× Cortex-A710 + 4× Cortex-A510
+              - 全核支持 bf16，启用后可加速 bf16 量化推理
             - **OOM 优先级保护** (oom_score_adj=-1000，防止被系统强杀)
-            
+            - **手动启停**：按需运行，节省内存与电量
+
             ### 📱 平台要求
             - Android arm64-v8a (API 28+)
             - Magisk 24.0+
-            
+            - 推荐机型: **Redmi Note 12 Turbo**（其他 armv8.6 设备也可通用）
+
             ### 🔧 文件安装位置
             | 项目 | 路径 |
             |------|------|
             | 二进制 | `/data/llama/llama-server` |
             | 模型目录 | `/data/llama/models/` |
             | 全局命令 | `llama-server` (已加入 PATH) |
-            | 自启脚本 | `/data/adb/modules/llama-server/service.sh` |
+            | 控制脚本 | `/data/adb/modules/llama-server/action.sh` |
             | 运行日志 | `/data/llama/llama.log` |
-            
-            ### 💡 手动重启服务（无需重启手机）
+
+            ### 💡 命令行手动控制（备用）
             ```bash
-            pkill llama-server
-            sh /data/adb/modules/llama-server/service.sh
+            # 启动（推荐参数，已针对 7+ Gen 2 调优）
+            nohup /data/llama/llama-server \
+              -m /data/llama/models/你的模型.gguf \
+              -c 2048 -t 4 --no-mmap \
+              --host 0.0.0.0 --port 8080 \
+              > /data/llama/llama.log 2>&1 &
+
+            # 停止
+            pkill -f "llama-server -m"
+
+            # 查看日志
+            tail -f /data/llama/llama.log
             ```
-            
+
             ### 🔗 与 Rust 程序配合使用
             API 地址: `http://127.0.0.1:8080`
-            
+
             **SHA256**: `$(cat ${{ env.MODULE_NAME }}.zip.sha256 | awk '{print $1}')`
           files: |
             ${{ env.MODULE_NAME }}.zip
