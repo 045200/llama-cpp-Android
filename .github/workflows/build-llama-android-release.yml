@@ -18,8 +18,7 @@ env:
   REPO: ${{ github.event.inputs.repo || 'ggml-org/llama.cpp' }}
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'Release' }}
   BUILD_DIR: build-android
-  NDK_VERSION: r27d
-  NDK_ROOT_PATH: /usr/local/lib/android/sdk/ndk/r27d
+  NDK_VERSION: r29
   MODULE_NAME: "llama-server-magisk"
   ARTIFACT_NAME: "llama-server-android-arm64-magisk"
 
@@ -35,7 +34,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 显式 checkout 当前仓库（包含 magisk/ 框架）
       - name: Checkout 当前仓库
         uses: actions/checkout@v6
         with:
@@ -60,62 +58,83 @@ jobs:
           ninja --version
 
       # ============================================================
-      # NDK 缓存 + 校验 + 按需重装
+      # NDK r29 —— 优先用 runner 预装 (29.0.14206865)，无则 nttld 下载
+      # 关键: 不再硬编码 r29 目录名; runner 用的是 29.x.x 数字版本号
       # ============================================================
-      - name: 缓存 Android NDK
-        id: cache-ndk
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.NDK_ROOT_PATH }}
-          key: ndk-${{ runner.os }}-${{ env.NDK_VERSION }}-v2
-
-      - name: 校验 NDK 缓存有效性
-        id: verify-ndk
+      - name: 检测 NDK r29
+        id: ndk
         run: |
-          TC="${{ env.NDK_ROOT_PATH }}/build/cmake/android.toolchain.cmake"
-          if [ -f "$TC" ]; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-            echo "✓ NDK 缓存有效: $TC"
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-            echo "✗ NDK 缓存无效或缺失"
-            echo "--- 当前目录内容 ---"
-            ls -la "${{ env.NDK_ROOT_PATH }}" 2>/dev/null || echo "(目录不存在)"
+          TC_REL="build/cmake/android.toolchain.cmake"
+          NDK_BASE="/usr/local/lib/android/sdk/ndk"
+          FOUND=""
+
+          if [ -d "$NDK_BASE" ]; then
+            for d in "$NDK_BASE"/29.*/; do
+              d="${d%/}"
+              if [ -f "$d/$TC_REL" ]; then
+                FOUND="$d"
+                break
+              fi
+            done
           fi
 
-      - name: 清理损坏的 NDK 残目录
-        if: steps.verify-ndk.outputs.valid != 'true'
-        run: |
-          rm -rf "${{ env.NDK_ROOT_PATH }}"
-          echo "已清理: ${{ env.NDK_ROOT_PATH }}"
+          if [ -n "$FOUND" ]; then
+            echo "path=$FOUND" >> $GITHUB_OUTPUT
+            echo "✓ runner 已预装 NDK r29: $FOUND"
+          else
+            echo "path=" >> $GITHUB_OUTPUT
+            echo "runner 无预装 r29，将通过 nttld 下载"
+          fi
 
-      - name: 安装 Android NDK（缓存缺失/损坏时）
-        if: steps.verify-ndk.outputs.valid != 'true'
+      - name: 下载安装 Android NDK r29（仅无预装时）
+        if: steps.ndk.outputs.path == ''
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
           local-cache: true
 
-      - name: 配置 NDK 环境变量并最终验证
+      - name: 导出 NDK 环境变量并最终验证
         run: |
-          TC="${{ env.NDK_ROOT_PATH }}/build/cmake/android.toolchain.cmake"
-          if [ ! -f "$TC" ]; then
-            echo "✗ 致命错误: 未找到 toolchain 文件: $TC"
-            echo "--- 实际 NDK 目录 ---"
-            ls -la /usr/local/lib/android/sdk/ndk/ || true
+          TC_REL="build/cmake/android.toolchain.cmake"
+          NDK_BASE="/usr/local/lib/android/sdk/ndk"
+          FOUND="${{ steps.ndk.outputs.path }}"
+
+          # 回退 1: nttld 设置的环境变量
+          if [ -z "$FOUND" ] || [ ! -f "$FOUND/$TC_REL" ]; then
+            if [ -n "$ANDROID_NDK_HOME" ] && [ -f "$ANDROID_NDK_HOME/$TC_REL" ]; then
+              FOUND="$ANDROID_NDK_HOME"
+            fi
+          fi
+
+          # 回退 2: 扫描 29.* 目录
+          if [ -z "$FOUND" ] || [ ! -f "$FOUND/$TC_REL" ]; then
+            for d in "$NDK_BASE"/29.*/; do
+              d="${d%/}"
+              [ -f "$d/$TC_REL" ] || continue
+              FOUND="$d"
+              break
+            done
+          fi
+
+          if [ -z "$FOUND" ] || [ ! -f "$FOUND/$TC_REL" ]; then
+            echo "✗ 未能定位 NDK r29"
+            ls -la "$NDK_BASE" 2>/dev/null || echo "(目录不存在)"
             exit 1
           fi
-          echo "ANDROID_NDK_HOME=${{ env.NDK_ROOT_PATH }}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=${{ env.NDK_ROOT_PATH }}" >> $GITHUB_ENV
-          echo "${{ env.NDK_ROOT_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
-          echo "✓ NDK 已就绪: ${{ env.NDK_ROOT_PATH }}"
+
+          echo "ANDROID_NDK_HOME=$FOUND" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$FOUND" >> $GITHUB_ENV
+          echo "NDK_PATH_RESOLVED=$FOUND" >> $GITHUB_ENV
+          echo "$FOUND/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          echo "✓ NDK r29 已就绪: $FOUND"
 
       - name: 构建工具综合校验
         run: |
           echo "=== 构建环境检查 ==="
           echo "CMake : $(cmake --version | head -n1)"
           echo "Ninja : $(ninja --version)"
-          echo "NDK   : $ANDROID_NDK_HOME"
+          echo "NDK   : $NDK_PATH_RESOLVED"
           echo "编译器: $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
           test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
             || { echo "✗ clang 未找到"; exit 1; }
@@ -228,7 +247,7 @@ jobs:
           ls -lh ./llama-server
 
       # ============================================================
-      # 构建 Magisk 模块 —— 使用 current_repo/magisk/ 框架
+      # 构建 Magisk 模块
       # ============================================================
       - name: 构建 Magisk 模块
         if: steps.check.outputs.skip != 'true' && success()
@@ -241,30 +260,21 @@ jobs:
 
           MODULE_DIR="${{ env.MODULE_NAME }}"
           mkdir -p "$MODULE_DIR"
-
-          # 复制用户自定义的 magisk 框架所有内容
           cp -r "$MAGISK_SRC"/* "$MODULE_DIR/"
-
-          # 用编译好的二进制替换占位文件
           cp ./llama-server "$MODULE_DIR/"
           chmod 755 "$MODULE_DIR/llama-server"
 
-          # 自动更新 module.prop 版本信息
           if [ -f "$MODULE_DIR/module.prop" ]; then
             sed -i "s/^version=.*/version=${{ steps.check.outputs.latest_tag }}/" "$MODULE_DIR/module.prop"
             sed -i "s/^versionCode=.*/versionCode=$(date +%Y%m%d%H%M)/" "$MODULE_DIR/module.prop"
           fi
 
-          # 赋予所有脚本执行权限
           find "$MODULE_DIR" -name "*.sh" -exec chmod 755 {} \;
           chmod 755 "$MODULE_DIR/system/bin/llama-server" 2>/dev/null || true
 
-          # 打包为 Magisk 模块 ZIP
           cd "$MODULE_DIR"
           zip -r9 "../${{ env.MODULE_NAME }}.zip" ./*
           cd ..
-
-          # 生成 SHA256 校验码
           sha256sum "${{ env.MODULE_NAME }}.zip" > "${{ env.MODULE_NAME }}.zip.sha256"
 
       - name: 上传 Magisk 模块 Artifact
@@ -287,6 +297,7 @@ jobs:
             ## 🚀 Magisk 模块发布 — 手动启停版（Redmi Note 12 Turbo 优化）
 
             **上游版本**: ${{ steps.check.outputs.latest_tag }}
+            **NDK**: r29 (${{ env.NDK_VERSION }})
 
             ### 📦 安装方式
             1. 下载 `${{ env.MODULE_NAME }}.zip`
@@ -339,7 +350,7 @@ jobs:
             # 启动（推荐参数，已针对 7+ Gen 2 调优）
             nohup /data/llama/llama-server \
               -m /data/llama/models/你的模型.gguf \
-              -c 2048 -t 4 --no-mmap \
+              -c 2048 -t 4 --no-mmap --log-verbosity 0 \
               --host 0.0.0.0 --port 8080 \
               > /data/llama/llama.log 2>&1 &
 
