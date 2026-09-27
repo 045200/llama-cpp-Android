@@ -67,7 +67,6 @@ do_start() {
         -m "$MODEL_PATH" \
         -c "$CTX" \
         -t "$THREADS" \
-        --no-mmap \
         --host 0.0.0.0 \
         --port "$PORT" \
         --log-verbosity "$LOG_VERBOSITY" \
